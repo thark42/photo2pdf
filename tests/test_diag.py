@@ -1,4 +1,5 @@
 import logging
+import os
 import threading
 import zipfile
 from pathlib import Path
@@ -16,6 +17,9 @@ def logenv(tmp_path, monkeypatch):
     monkeypatch.setenv("USER", "annadevries")
     monkeypatch.setenv("USERNAME", "annadevries")
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    # Windows paths come from these; point them into the test home too.
+    monkeypatch.setenv("LOCALAPPDATA", str(home / "AppData" / "Local"))
+    monkeypatch.setenv("APPDATA", str(home / "AppData" / "Roaming"))
     root = logging.getLogger()
     saved = root.handlers[:]
     for h in saved:
@@ -31,7 +35,8 @@ def logenv(tmp_path, monkeypatch):
 
 def test_log_location_and_redaction(logenv):
     home, path = logenv
-    assert path == home / ".cache" / "Photo2PDF" / "logs" / "photo2pdf.log"
+    expected = (home / "AppData" / "Local" if os.name == "nt" else home / ".cache") / "Photo2PDF" / "logs"
+    assert path == expected / "photo2pdf.log"
     logging.info("opened %s for annadevries", home / "Pictures" / "IMG_1.jpg")
     try:
         raise ValueError(f"bad file {home}/x.jpg")
