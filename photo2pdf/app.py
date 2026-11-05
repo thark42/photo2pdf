@@ -145,8 +145,10 @@ class App:
         self.last_outputs: list[Path] = []
         self.scan_window = None
         self.eta = ui.Eta()
-        threading.Thread(target=lambda: diag.log_session_header(Tesseract.find(), self.opts),
-                         name="session-header", daemon=True).start()
+        # Worker threads must never hold a reference to a window: if a thread drops the last
+        # one, Tk is torn down from that thread, which crashes on Windows ("Tcl_AsyncDelete:
+        # async handler deleted by the wrong thread"). Pass plain data only.
+        threading.Thread(target=_log_header, args=(self.opts,), name="session-header", daemon=True).start()
 
         menubar = tk.Menu(self.root)
         filem = tk.Menu(menubar, tearoff=0)
@@ -302,14 +304,16 @@ class App:
         self.ui.keep_awake(True)
         logging.info("quick: %d inputs, opts=%s", len(files), asdict(opts))
 
+        events, cancel = self.events, self.cancel   # plain objects only: no window in the thread
+
         def work():
             try:
-                res = convert(files, opts, cancel=self.cancel,
-                              progress=lambda d, t, m: self.events.put(("progress", d, t, m)))
-                self.events.put(("done", res))
+                res = convert(files, opts, cancel=cancel,
+                              progress=lambda d, t, m: events.put(("progress", d, t, m)))
+                events.put(("done", res))
             except Exception as exc:  # noqa: BLE001
                 logging.error("conversion crashed:\n%s", traceback.format_exc())
-                self.events.put(("error", str(exc)))
+                events.put(("error", str(exc)))
 
         threading.Thread(target=work, name="quick", daemon=True).start()
 
@@ -419,6 +423,12 @@ class App:
 
     def run(self) -> None:
         self.root.mainloop()
+
+
+def _log_header(opts) -> None:
+    from photo2pdf import diag
+
+    diag.log_session_header(Tesseract.find(), opts)
 
 
 class SettingsDialog:

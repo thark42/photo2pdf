@@ -170,15 +170,18 @@ class ScanWindow:
         self.busy = True
         ui.keep_awake(True)
 
+        # Plain objects only in the thread (never self / a window): see App.__init__.
+        events, cancel, inputs, scan, opts = self.events, self.cancel, self.inputs, self.scan, self.opts
+
         def work():
             try:
-                infos = scan_paths(self.inputs, self.scan, tess,
-                                   progress=lambda d, t, m: self.events.put(("progress", d, t, m)),
-                                   cancel=self.cancel, opts=self.opts)
-                self.events.put(("scanned", infos))
+                infos = scan_paths(inputs, scan, tess,
+                                   progress=lambda d, t, m: events.put(("progress", d, t, m)),
+                                   cancel=cancel, opts=opts)
+                events.put(("scanned", infos))
             except Exception as exc:  # noqa: BLE001
                 logging.error("scan crashed:\n%s", traceback.format_exc())
-                self.events.put(("error", str(exc)))
+                events.put(("error", str(exc)))
 
         threading.Thread(target=work, name="scan", daemon=True).start()
 
@@ -635,15 +638,17 @@ class ScanWindow:
         self.b_save.configure(state="disabled")
         self.b_close.configure(text="Stop", command=self._stop)
 
+        events, cancel = self.events, self.cancel   # plain objects only in the thread
+
         def work():
             try:
                 res = save_documents(docs, out_dir, opts,
-                                     progress=lambda d, t, m: self.events.put(("progress", d, t, m)),
-                                     cancel=self.cancel)
-                self.events.put(("saved", res, idx))
+                                     progress=lambda d, t, m: events.put(("progress", d, t, m)),
+                                     cancel=cancel)
+                events.put(("saved", res, idx))
             except Exception as exc:  # noqa: BLE001
                 logging.error("save crashed:\n%s", traceback.format_exc())
-                self.events.put(("error", str(exc)))
+                events.put(("error", str(exc)))
 
         threading.Thread(target=work, name="save", daemon=True).start()
 
@@ -743,7 +748,9 @@ class Preview:
         self.label.pack(fill="both", expand=True)
         self.img = None
         self.base = None   # processed page at rotation 0, cached per page
+        self.results: queue.Queue = queue.Queue()
         self.win.grab_set()  # page indices must not change underneath the preview
+        self.win.after(100, self._poll)
         self.load()
 
     def _page(self):
@@ -757,20 +764,32 @@ class Preview:
         self.b_next.state(["!disabled"] if self.i < len(grp) - 1 else ["disabled"])
         self.label.configure(image="", text="Loading…")
         self.base = None
-        opts = self.sw.opts
+        opts, path, results = self.sw.opts, ph.path, self.results
 
         def work():
+            # No Tk calls and no window references here: hand the image back through a queue
+            # that the Tk thread polls.
             from photo2pdf.core import load_page
             try:
-                im = load_page(ph.path, opts, max_edge=2400)
+                im = load_page(path, opts, max_edge=2400)
             except Exception as exc:  # noqa: BLE001
                 logging.exception("preview failed")
                 im = exc
-            try:
-                self.win.after(0, lambda: self._loaded(ph, im))
-            except Exception:  # noqa: BLE001 - window closed meanwhile
-                pass
+            results.put((path, im))
         threading.Thread(target=work, name="preview", daemon=True).start()
+
+    def _poll(self):
+        if not self.win.winfo_exists():
+            return
+        try:
+            while True:
+                path, im = self.results.get_nowait()
+                ph = self._page()
+                if ph.path == path:
+                    self._loaded(ph, im)
+        except queue.Empty:
+            pass
+        self.win.after(100, self._poll)
 
     def _loaded(self, ph, im):
         if not self.win.winfo_exists() or ph is not self._page():

@@ -74,6 +74,20 @@ def test_review_window_edit_undo_page_and_close(app, monkeypatch, tmp_path):
     sw._set_tab(review.TAB_OTHER)
     sw._set_tab(review.TAB_SAVED)
     assert sw.pending_work()            # 29 unsaved documents
+    # Large preview loads the page in a worker and hands it back through a queue.
+    from synth import page
+    real = tmp_path / "IMG_real.jpg"
+    page().save(real)
+    sw.plan.groups[1][0].path = real
+    pv = review.Preview(sw, 1, 0)
+    for _ in range(100):
+        sw.win.update()
+        if pv.base is not None:
+            break
+        import time
+        time.sleep(0.05)
+    assert pv.base is not None
+    pv.win.destroy()
     sw.close(force=True)
     assert app.scan_window is None or not sw.win.winfo_exists()
 
