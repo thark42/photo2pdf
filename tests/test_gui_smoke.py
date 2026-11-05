@@ -24,6 +24,11 @@ def app(monkeypatch):
         a.root.destroy()
     except tk.TclError:
         pass
+    # Free every Tk object now, on this (the Tk) thread, and give automatic GC back to the
+    # tests that follow: App switches it off so collections only run on the Tk thread.
+    import gc
+    gc.collect()
+    gc.enable()
 
 
 def _plan_photos(n_docs=30):
@@ -71,6 +76,11 @@ def test_review_window_edit_undo_page_and_close(app, monkeypatch, tmp_path):
     assert sw.pending_work()            # 29 unsaved documents
     sw.close(force=True)
     assert app.scan_window is None or not sw.win.winfo_exists()
+
+
+def test_app_runs_gc_only_on_tk_thread(app):
+    import gc
+    assert not gc.isenabled()          # collections are scheduled on the Tk loop instead
 
 
 def test_main_window_settings_and_multi_folder_routing(app, monkeypatch, tmp_path):

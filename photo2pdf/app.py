@@ -136,6 +136,7 @@ class App:
 
         self.root.title(APP_NAME)
         diag.hook_tk(self.root)
+        ui.main_thread_gc(self.root)
         self.opts = load_options()
         self.scan = load_scan_settings()
         self.events: queue.Queue = queue.Queue()

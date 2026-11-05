@@ -28,6 +28,35 @@ def enable_dpi_awareness() -> None:
         logging.exception("could not enable DPI awareness")
 
 
+def main_thread_gc(root, fast_ms: int = 1000, full_every: int = 30) -> None:
+    """Run Python's garbage collector only on the Tk (main) thread.
+
+    Tkinter objects (PhotoImage, StringVar, ...) that end up in reference cycles are
+    freed by the cyclic GC, which otherwise runs in whichever thread happens to be
+    allocating -- often a scan/save worker. Tk must only be touched from its own
+    thread; on Windows a collection in a worker crashed the process (seen in CI as
+    'Garbage-collecting' in a worker thread inside a Tk-using test run). Automatic
+    GC is switched off and collections are scheduled on the Tk event loop instead:
+    young generation every second, full every `full_every` seconds.
+    """
+    import gc
+
+    gc.disable()
+    state = {"n": 0}
+
+    def tick():
+        try:
+            state["n"] += 1
+            gc.collect(2 if state["n"] % full_every == 0 else 0)
+        finally:
+            try:
+                root.after(fast_ms, tick)
+            except Exception:  # noqa: BLE001 - root destroyed
+                pass
+
+    root.after(fast_ms, tick)
+
+
 def keep_awake(on: bool) -> None:
     """Stop Windows sleeping during a long scan or save (the screen may still turn off)."""
     if os.name != "nt":
