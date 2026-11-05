@@ -43,7 +43,7 @@ def test_log_location_and_redaction(logenv):
     except ValueError:
         logging.exception("boom")
     text = path.read_text("utf-8")
-    assert "~/Pictures/IMG_1.jpg" in text and "for <user>" in text
+    assert os.path.join("~", "Pictures", "IMG_1.jpg") in text and "for <user>" in text
     assert str(home) not in text and "annadevries" not in text
     assert "ValueError: bad file ~/x.jpg" in text
 
