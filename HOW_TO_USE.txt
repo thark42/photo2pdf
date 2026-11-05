@@ -42,6 +42,17 @@ THE MAIN THING: ORGANIZE A FOLDER OF PHOTOS
    you chose, sorted into one folder per year (you can change this at the
    bottom of the window: per year, per sender, or all together).
 
+CARDS: ID, PASSPORT, DRIVING LICENCE, INSURANCE, BANK AND LOYALTY CARDS
+------------------------------------------------------------------------
+
+Cards work the same way. Photograph the front and then the back, one
+right after the other, ideally on a plain darker surface with all four
+corners visible. They become one PDF at real card size in a "Cards"
+folder, named for example:
+   Health insurance card - Zilveren Kruis - valid until 2026-12-31
+   Passport - Netherlands - valid until 2031-05-01
+Names and card or document numbers are never put in the file name.
+
 Do it again whenever you like. Documents already saved are remembered and
 won't be saved twice: they appear under "Already saved". New photos show
 up as new documents.
