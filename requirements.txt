@@ -1,0 +1,6 @@
+# Runtime deps. Pinned; bump deliberately.
+pillow==12.3.0
+pillow-heif==1.8.1
+img2pdf==0.6.3
+pypdf==6.21.2
+tkinterdnd2==0.6.4

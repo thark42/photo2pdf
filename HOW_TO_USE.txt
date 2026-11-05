@@ -1,0 +1,51 @@
+PHOTOS TO PDF
+=============
+
+Turns photos of documents into PDF files. Everything happens on this
+computer: nothing is uploaded anywhere, and it works without internet.
+
+
+THREE WAYS TO USE IT
+--------------------
+
+1. Right-click
+   Select one or more photos in File Explorer, right-click,
+   choose "Send to" > "Photos to PDF".
+   (On Windows 11, click "Show more options" first to see "Send to".)
+
+2. Drag and drop
+   Drag photos (or a whole folder) onto the "Photos to PDF" icon on the
+   desktop, or into the app window.
+
+3. Open the app
+   Start menu > "Photos to PDF", then click the big box and pick photos.
+
+The PDF is saved in the same folder as the photos, and that folder opens
+automatically with the new PDF highlighted.
+
+
+OPTIONS (in the app window; remembered for next time)
+-----------------------------------------------------
+
+- One PDF for all photos, or a separate PDF for each photo.
+  Pages are ordered by file name, which for phone photos is the order
+  they were taken.
+- Make text searchable: lets you search the PDF and copy text out of it.
+  Also turns sideways or upside-down pages the right way up.
+  Takes a few seconds per page.
+- Black and white: smaller files, good for plain text documents.
+
+
+TIPS FOR BETTER RESULTS
+-----------------------
+
+- Photograph the page straight from above, in good light, filling the
+  frame. The app does not straighten pages photographed at an angle.
+- iPhone photos (.HEIC) work as they are.
+
+
+IF SOMETHING GOES WRONG
+-----------------------
+
+A log file is kept at:  %APPDATA%\Photo2PDF\log.txt
+(paste that into the File Explorer address bar to find it).
