@@ -238,8 +238,11 @@ class Tesseract:
             # Stop a console window flashing up for every page.
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
         env = dict(os.environ, OMP_THREAD_LIMIT=str(threads or 4))
+        # Tesseract writes UTF-8. Without an explicit encoding Windows decodes with the ANSI
+        # code page (cp1252): bytes such as 0x9d (from a curly quote) raise in the reader
+        # thread and the whole OCR output is lost. Decode as UTF-8 and never fail on a byte.
         return subprocess.run(
-            cmd, cwd=cwd, capture_output=True, text=True,
+            cmd, cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=timeout, env=env, **kwargs,
         )
 
@@ -441,6 +444,11 @@ def find_rotation(im, tess: Tesseract, language: str, work: Path,
         if len(keep) == 1:
             logging.info("rotation=%d via close vote %s + landscape", keep[0], counts)
             return keep[0]
+        if 0 in contenders:
+            # Upright reads as well as anything else: leave it. A weak OSD answer the vote
+            # has already ruled out (e.g. 180 with 9 words vs 31) must not turn the page.
+            logging.info("rotation=0 via close vote %s (OSD %s not among the leaders)", counts, osd)
+            return 0
     if osd and osd[1] >= 0.5:
         logging.info("rotation=%d via weak OSD %s; vote inconclusive %s", osd[0], osd, counts)
         return osd[0]

@@ -166,3 +166,35 @@ def test_heic_input(tmp_path):
         pytest.skip(f"no HEIF encoder: {exc}")
     res = convert([src], Options(ocr=False))
     assert len(res.outputs) == 1 and not res.warnings
+
+
+def test_tesseract_output_is_decoded_as_utf8(monkeypatch):
+    """Windows otherwise decodes with cp1252 and loses the whole output on bytes like 0x9d."""
+    import subprocess as sp
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen.update(kw)
+        return sp.CompletedProcess(cmd, 0, stdout="", stderr="")
+    monkeypatch.setattr(sp, "run", fake_run)
+    Tesseract(Path("tesseract"))._run(["--version"], cwd=Path("."))
+    assert seen["encoding"] == "utf-8" and seen["errors"] == "replace"
+
+
+def test_weak_osd_outside_vote_leaders_does_not_rotate(tmp_path, monkeypatch):
+    from photo2pdf import core
+    state = {"deg": 0}
+    orig = core.rotate_cw
+
+    def spy(im, deg):
+        state["deg"] = deg % 360
+        return orig(im, deg)
+    monkeypatch.setattr(core, "rotate_cw", spy)
+
+    class FakeTess:
+        def osd(self, p):
+            return (180, 0.58)          # weak guess
+
+        def word_count(self, p, lang, psm=3, threads=None):
+            return {0: 31, 90: 31, 180: 9, 270: 8}[state["deg"]]
+    assert core.find_rotation(Image.new("RGB", (400, 1000), "white"), FakeTess(), "eng", tmp_path) == 0
