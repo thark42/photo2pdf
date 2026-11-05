@@ -26,6 +26,7 @@ from pathlib import Path
 
 from photo2pdf import __version__
 from photo2pdf.core import IMAGE_EXTS, Options, Result, Tesseract, convert
+from photo2pdf.detect import ScanSettings
 
 APP_NAME = "Photos to PDF"
 
@@ -54,9 +55,24 @@ def load_options() -> Options:
     return opts
 
 
+def load_scan_settings() -> ScanSettings:
+    """Advanced folder-scan knobs; only editable in settings.json under "scan"."""
+    s = ScanSettings()
+    try:
+        saved = json.loads((_data_dir() / "settings.json").read_text("utf-8")).get("scan", {})
+        for k in ("min_words", "gap_seconds", "recursive", "workers"):
+            if k in saved:
+                setattr(s, k, type(getattr(s, k))(saved[k]))
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    return s
+
+
 def save_options(opts: Options) -> None:
     try:
-        (_data_dir() / "settings.json").write_text(json.dumps(asdict(opts), indent=2), "utf-8")
+        data = asdict(opts)
+        data["scan"] = {k: v for k, v in asdict(load_scan_settings()).items() if k != "workers"}
+        (_data_dir() / "settings.json").write_text(json.dumps(data, indent=2), "utf-8")
     except OSError:
         logging.exception("could not save settings")
 
@@ -120,7 +136,7 @@ class App:
             self.root = tk.Tk()
 
         self.root.title(APP_NAME)
-        self.root.minsize(460, 420)
+        self.root.minsize(480, 500)
         self.opts = load_options()
         self.events: queue.Queue = queue.Queue()
         self.busy = False
@@ -134,7 +150,7 @@ class App:
         # Drop zone
         self.drop = tk.Label(
             self.root,
-            text="Drag photos here\n\nor click to choose photos",
+            text=self._idle_text(True),
             font=("Segoe UI", 14), relief="groove", bd=2,
             bg="#f4f6f8", fg="#333", cursor="hand2", height=7,
         )
@@ -144,7 +160,9 @@ class App:
             self.drop.drop_target_register(self.dnd_files)
             self.drop.dnd_bind("<<Drop>>", self._on_drop)
         else:
-            self.drop.configure(text="Click here to choose photos")
+            self.drop.configure(text=self._idle_text(False))
+        ttk.Button(self.root, text="Find the documents in a folder of photos…",
+                   command=self.choose_folder).pack(fill="x", padx=16, pady=(0, 4))
 
         # Options
         box = ttk.LabelFrame(self.root, text="Options")
@@ -179,7 +197,31 @@ class App:
         if initial_files:
             self.root.after(200, lambda: self.start(initial_files))
 
+    @staticmethod
+    def _idle_text(dnd: bool) -> str:
+        if dnd:
+            return ("Drag photos here to make a PDF\n\nor click to choose photos\n\n"
+                    "(drag a folder here to find the documents in it)")
+        return "Click here to choose photos"
+
     # -- input --------------------------------------------------------------
+
+    def choose_folder(self) -> None:
+        if self.busy:
+            return
+        from tkinter import filedialog
+
+        d = filedialog.askdirectory(parent=self.root, title="Choose a folder of photos")
+        if d:
+            self.open_folder(Path(d))
+
+    def open_folder(self, folder: Path) -> None:
+        from photo2pdf.review import ScanWindow
+
+        opts = self._current_options()
+        save_options(opts)
+        logging.info("folder scan: %s", folder)
+        ScanWindow(self, folder, opts, load_scan_settings())
 
     def choose(self) -> None:
         if self.busy:
@@ -207,6 +249,9 @@ class App:
         return self.opts
 
     def start(self, files: list[str]) -> None:
+        if len(files) == 1 and Path(files[0]).is_dir():
+            self.open_folder(Path(files[0]))
+            return
         opts = self._current_options()
         save_options(opts)
         self.busy = True
@@ -246,11 +291,7 @@ class App:
         from tkinter import messagebox
 
         self.busy = False
-        self.drop.configure(
-            text="Drag more photos here\n\nor click to choose photos" if self.dnd_files
-            else "Click here to choose photos",
-            cursor="hand2",
-        )
+        self.drop.configure(text=self._idle_text(bool(self.dnd_files)), cursor="hand2")
         self.last_outputs = res.outputs
         for w in res.warnings:
             logging.warning(w)
@@ -321,7 +362,30 @@ def selftest(out_pdf: Path) -> int:
         out_pdf.write_bytes(res.outputs[0].read_bytes())
     ok = "brown" in text.lower()
     print(f"extracted ok={ok}: {text[:80]!r}")
-    return 0 if ok else 1
+    if not ok:
+        return 1
+
+    # Folder mode: two documents separated by a non-document photo.
+    from photo2pdf.detect import Plan, ScanSettings, scan_folder
+
+    with tempfile.TemporaryDirectory() as td:
+        folder = Path(td)
+        page = img
+        page.save(folder / "IMG_20260301_100000.jpg")
+        page.rotate(180).save(folder / "IMG_20260301_100030.jpg")
+        noise = Image.new("RGB", (900, 700))
+        nd = ImageDraw.Draw(noise)
+        for y in range(0, 700, 7):
+            nd.line([(0, y), (900, y)], fill=((y * 3) % 255, (y * 7) % 255, 120))
+        noise.save(folder / "IMG_20260301_100100.jpg")
+        page.save(folder / "IMG_20260301_100200.jpg")
+        infos = scan_folder(folder, ScanSettings(workers=2), tess, use_cache=False)
+        plan = Plan.from_scan(infos, 180)
+        shape = [len(g) for g in plan.groups]
+        print(f"folder scan: words={[i.words for i in infos]} groups={shape}")
+        if shape != [2, 1]:
+            return 1
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:

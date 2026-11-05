@@ -24,6 +24,33 @@ The PDF is saved in the same folder as the photos, and that folder opens
 automatically with the new PDF highlighted.
 
 
+FIND THE DOCUMENTS IN A FOLDER OF PHOTOS
+----------------------------------------
+
+Got a folder with a mix of holiday snaps and photos of letters, bills or
+receipts? Click "Find the documents in a folder of photos..." (or drag
+the folder into the window, or right-click the folder > Send to >
+Photos to PDF).
+
+The app looks at every photo and picks out the ones with a page of text
+in them. Photos taken within a few minutes of each other become one
+multi-page PDF; a gap, or an ordinary photo in between, starts a new one.
+
+You then get a screen showing what it found:
+- Click a page to move it left/right, start a new document from it, or
+  remove it.
+- "Join with document above" merges two documents into one.
+- "Not a document" drops a whole group.
+- Under "Other photos", click a photo that the app missed to add it.
+
+Click "Save" and the PDFs go into a "PDFs" folder inside the photo folder
+(you can change this). Nothing is moved or deleted; your photos stay as
+they are.
+
+Checking takes about a second per photo, so a big folder takes a while.
+Doing the same folder again later is much quicker.
+
+
 OPTIONS (in the app window; remembered for next time)
 -----------------------------------------------------
 
@@ -33,7 +60,8 @@ OPTIONS (in the app window; remembered for next time)
 - Make text searchable: lets you search the PDF and copy text out of it.
   Also turns sideways or upside-down pages the right way up.
   Takes a few seconds per page.
-- Black and white: smaller files, good for plain text documents.
+- Black and white: evens out shadows so the page looks like a scan, and
+  makes smaller files. Best for plain text documents.
 
 
 TIPS FOR BETTER RESULTS

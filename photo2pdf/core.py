@@ -158,7 +158,8 @@ class Tesseract:
             return cls(Path(on_path), None)  # system install knows its tessdata
         return None
 
-    def _run(self, args: list[str], cwd: Path, timeout: int = 300) -> subprocess.CompletedProcess:
+    def _run(self, args: list[str], cwd: Path, timeout: int = 300,
+             threads: Optional[int] = None) -> subprocess.CompletedProcess:
         cmd = [str(self.exe), *args]
         if self.tessdata:
             cmd += ["--tessdata-dir", str(self.tessdata)]
@@ -166,7 +167,7 @@ class Tesseract:
         if os.name == "nt":
             # Stop a console window flashing up for every page.
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
-        env = dict(os.environ, OMP_THREAD_LIMIT=os.environ.get("OMP_THREAD_LIMIT", "4"))
+        env = dict(os.environ, OMP_THREAD_LIMIT=str(threads or 4))
         return subprocess.run(
             cmd, cwd=cwd, capture_output=True, text=True,
             timeout=timeout, env=env, **kwargs,
@@ -236,6 +237,23 @@ def _open_image(src: Path):
     return Image.open(src)
 
 
+def flatten_lighting(im):
+    """Even out shadows and uneven lighting on a greyscale page photo.
+
+    Divides each pixel by a heavily blurred copy of the image (an estimate of
+    the paper's local brightness), so paper goes near-white and ink stays
+    dark. Standard background-normalisation trick; makes phone photos look
+    closer to a scan and noticeably helps Tesseract on unevenly lit pages.
+    """
+    from PIL import ImageFilter, ImageMath
+
+    im = im.convert("L")
+    bg = im.filter(ImageFilter.GaussianBlur(radius=max(im.size) / 40))
+    return ImageMath.lambda_eval(
+        lambda a: a["float"](a["x"]) * 250 / (a["float"](a["b"]) + 1), x=im, b=bg
+    ).convert("L")
+
+
 def prepare_page(src: Path, dst: Path, opts: Options, extra_rotation: int = 0) -> Path:
     """Write a normalised JPEG for one photo. Returns dst."""
     from PIL import Image, ImageOps
@@ -259,6 +277,8 @@ def prepare_page(src: Path, dst: Path, opts: Options, extra_rotation: int = 0) -
                 (max(1, round(im.width * scale)), max(1, round(im.height * scale))),
                 Image.LANCZOS,
             )
+        if opts.grayscale:
+            im = flatten_lighting(im)
         w_in, h_in = (A4_W_IN, A4_H_IN) if im.height >= im.width else (A4_H_IN, A4_W_IN)
         dpi = max(im.width / w_in, im.height / h_in, 1.0)
         im.save(dst, "JPEG", quality=opts.jpeg_quality, dpi=(dpi, dpi), optimize=True)
@@ -290,63 +310,110 @@ def _merge(pages: list[Path], out: Path) -> None:
 # Entry point
 # --------------------------------------------------------------------------
 
+def _render_pages(
+    images: list[Path], work: Path, opts: Options, tess: Optional[Tesseract],
+    result: Result, progress: ProgressFn, start: int, total: int,
+) -> list[tuple[Path, Path]]:
+    """One single-page PDF per image in `work`. Unreadable images become warnings."""
+    pages: list[tuple[Path, Path]] = []
+    for k, src in enumerate(images):
+        n = start + k
+        progress(n, total, f"Page {n + 1} of {total}: {src.name}")
+        stem = f"p{n:05d}"  # ASCII temp names: Tesseract is fragile with non-ASCII paths
+        try:
+            jpg = prepare_page(src, work / f"{stem}.jpg", opts)
+        except Exception as exc:  # noqa: BLE001 - report and keep going
+            result.warnings.append(f"Skipped {src.name}: could not read image ({exc})")
+            continue
+        if tess and opts.ocr:
+            if opts.auto_rotate:
+                rot = tess.detect_rotation(jpg)
+                if rot:
+                    prepare_page(src, jpg, opts, extra_rotation=rot)
+            try:
+                pdf = tess.render_pdf(jpg, opts.language)
+            except Exception as exc:  # noqa: BLE001
+                result.warnings.append(f"{src.name}: text recognition failed ({exc}); saved without text")
+                pdf = _image_only_pdf(jpg)
+        else:
+            pdf = _image_only_pdf(jpg)
+        pages.append((src, pdf))
+    return pages
+
+
+def _resolve_tess(opts: Options, tesseract: Optional[Tesseract], result: Result) -> Optional[Tesseract]:
+    tess = tesseract if tesseract is not None else (Tesseract.find() if opts.ocr else None)
+    if opts.ocr and tess is None:
+        result.warnings.append("Text recognition engine not found; PDFs are not searchable.")
+    return tess
+
+
 def convert(
     inputs: Iterable[str | os.PathLike],
     opts: Options,
     progress: Optional[ProgressFn] = None,
     tesseract: Optional[Tesseract] = None,
 ) -> Result:
+    """Convert dropped/selected photos: one combined PDF, or one PDF per photo."""
     progress = progress or (lambda done, total, msg: None)
     result = Result()
     images = collect_images(inputs)
     if not images:
         result.warnings.append("No photos found. Supported: " + ", ".join(sorted(IMAGE_EXTS)))
         return result
-
-    tess = tesseract if tesseract is not None else (Tesseract.find() if opts.ocr else None)
-    if opts.ocr and tess is None:
-        result.warnings.append("Text recognition engine not found; PDFs are not searchable.")
+    tess = _resolve_tess(opts, tesseract, result)
 
     total = len(images)
     with tempfile.TemporaryDirectory(prefix="photo2pdf-") as td:
-        work = Path(td)
-        page_pdfs: list[tuple[Path, Path]] = []  # (source image, page pdf)
-        for i, src in enumerate(images):
-            progress(i, total, f"Page {i + 1} of {total}: {src.name}")
-            stem = f"p{i:04d}"  # ASCII temp names: Tesseract is fragile with non-ASCII paths
-            try:
-                jpg = prepare_page(src, work / f"{stem}.jpg", opts)
-            except Exception as exc:  # noqa: BLE001 - report and keep going
-                result.warnings.append(f"Skipped {src.name}: could not read image ({exc})")
-                continue
-
-            if tess and opts.ocr:
-                if opts.auto_rotate:
-                    rot = tess.detect_rotation(jpg)
-                    if rot:
-                        prepare_page(src, jpg, opts, extra_rotation=rot)
-                try:
-                    pdf = tess.render_pdf(jpg, opts.language)
-                except Exception as exc:  # noqa: BLE001
-                    result.warnings.append(f"{src.name}: text recognition failed ({exc}); saved without text")
-                    pdf = _image_only_pdf(jpg)
-            else:
-                pdf = _image_only_pdf(jpg)
-            page_pdfs.append((src, pdf))
-
-        if not page_pdfs:
+        pages = _render_pages(images, Path(td), opts, tess, result, progress, 0, total)
+        if not pages:
             return result
-
         progress(total, total, "Saving…")
         if opts.combine:
-            out = combined_output_path([s for s, _ in page_pdfs])
-            _merge([p for _, p in page_pdfs], out)
+            out = combined_output_path([s for s, _ in pages])
+            _merge([p for _, p in pages], out)
             result.outputs.append(out)
         else:
-            for src, pdf in page_pdfs:
+            for src, pdf in pages:
                 out = unique_path(output_dir_for(src.parent) / f"{src.stem}.pdf")
                 shutil.copyfile(pdf, out)
                 result.outputs.append(out)
 
+    progress(total, total, "Done")
+    return result
+
+
+def save_documents(
+    documents: list[tuple[str, list[Path]]],
+    out_dir: Path,
+    opts: Options,
+    progress: Optional[ProgressFn] = None,
+    tesseract: Optional[Tesseract] = None,
+    cancel=None,
+) -> Result:
+    """Folder mode: write each (file name, ordered photos) as one multi-page PDF in out_dir.
+
+    Page order is kept exactly as given (the review screen decides it).
+    """
+    progress = progress or (lambda done, total, msg: None)
+    result = Result()
+    tess = _resolve_tess(opts, tesseract, result)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    total = sum(len(imgs) for _, imgs in documents)
+    done = 0
+    with tempfile.TemporaryDirectory(prefix="photo2pdf-") as td:
+        for d, (name, imgs) in enumerate(documents):
+            if cancel is not None and cancel.is_set():
+                result.warnings.append("Stopped before finishing; documents saved so far are kept.")
+                break
+            work = Path(td) / f"d{d:04d}"
+            work.mkdir()
+            pages = _render_pages(imgs, work, opts, tess, result, progress, done, total)
+            done += len(imgs)
+            if not pages:
+                continue
+            out = unique_path(out_dir / name)
+            _merge([p for _, p in pages], out)
+            result.outputs.append(out)
     progress(total, total, "Done")
     return result
