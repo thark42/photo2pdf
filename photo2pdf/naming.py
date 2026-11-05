@@ -574,6 +574,15 @@ def extract_receipt(text: str, today: Optional[date] = None) -> DocFields:
                 break
     totals = [_amount(m.group(0)) for m in _TOTAL_LINE.finditer(text)]
     totals = [t for t in totals if t]
+    if not totals:
+        # Column layout: "TOTAAL" on the left, the amount far right. OCR often returns them
+        # as separate lines, so also take the first amount within the next ~2 lines.
+        for m in re.finditer(r"\b(totaal|total|te betalen)\b", text, re.I):
+            tail = text[m.end(): m.end() + 120].split("\n")[:3]
+            amt = _amount("\n".join(tail))
+            if amt:
+                first_amt = re.search(_AMOUNT, "\n".join(tail))
+                totals.append(first_amt.group(1).replace(",", ".") if first_amt else amt)
     if totals:
         f.extra["total"] = max(totals, key=lambda t: float(t))
     return f

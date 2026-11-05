@@ -67,6 +67,13 @@ def test_kind_names(fields, expected):
     assert naming.suggest_name(fields, "fallback.pdf") == expected
 
 
+def test_receipt_total_when_ocr_splits_the_columns():
+    # Label and amount in separate OCR lines (wide gap on the till slip).
+    text = "ALBERT HEIJN\nBANANEN\n1,99\nTOTAAL\nPINNEN\n12,16\n12,16\n02-11-2024 14:32"
+    f = naming.extract_receipt(text, TODAY)
+    assert f.extra.get("total") == "12.16"
+
+
 def test_business_card_uses_domain_not_person():
     f = naming.business_card_fields("Jan Bakker\nBakker Bouw BV\n06 12345678\njan@bakkerbouw.nl")
     assert naming.suggest_name(f, "x.pdf") == "Business card - bakkerbouw.nl.pdf"
