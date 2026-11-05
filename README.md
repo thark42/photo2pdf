@@ -182,6 +182,44 @@ Not measured:
 
 Expect misses. The review screen is where they get fixed.
 
+## Diagnostics and problem reports (`diag.py`)
+
+- **Rolling log:** `%LOCALAPPDATA%\Photo2PDF\logs\photo2pdf.log`, 1 MB per
+  file, 5 old files kept (about 6 MB maximum). Native crashes from OpenCV,
+  Tk and similar go to `crash.log` via `faulthandler`.
+- **What each session records:**
+  - app, OS, Python, library and Tesseract versions, bundled languages,
+    settings
+  - per page: file name, size, timings, whether the page was found and the
+    skew, the orientation decision and how it was reached (OSD confidence
+    or the word-vote counts), word count, document yes/no, OCR fallbacks
+  - folder scan totals and the shape of the plan
+  - **every review-screen correction** (rotate, move, split, join, remove,
+    add as document, rename), with what the app had decided. This is the
+    signal for tuning thresholds and naming rules.
+  - all errors with tracebacks, including uncaught exceptions in worker
+    threads and Tk callbacks
+- **Privacy:**
+  - the photos, PDFs and OCR text are never logged
+  - the home folder becomes `~` and the Windows user name `<user>`
+  - lines derived from document content (recognised date, sender and type,
+    and names the user types) are tagged `FIELDS`
+- **Report:** Help → "Report a problem or idea…", or offered automatically
+  after warnings, errors or a crash. It writes
+  `Desktop\Photos to PDF report <date>.zip` containing:
+  - `message.txt` (her description)
+  - `system.json`
+  - `logs/*`
+  - `settings.json`
+  - `naming.json`
+
+  A checkbox (on by default) controls whether `FIELDS` lines are included.
+  Unticking it replaces them with `FIELDS [left out]` and leaves out
+  `naming.json`. Nothing is sent anywhere; she emails the zip.
+- **Reading a report:** grep for `review ` to see corrections, `rotation=`
+  for orientation decisions, `straighten` for perspective, and `ERROR` or
+  `CRITICAL` for failures.
+
 ## Behaviour
 
 - Quick mode orders pages by natural filename sort, because Windows
@@ -193,8 +231,8 @@ Expect misses. The review screen is where they get fixed.
 - A page that fails produces a warning. It doesn't abort the batch.
 - Each photo is re-encoded once as JPEG (quality 85, long edge ≤ 3508 px)
   after straightening and rotating.
-- Settings are in `%APPDATA%\Photo2PDF\settings.json` and the log in
-  `log.txt` next to it.
+- Settings are in `%APPDATA%\Photo2PDF\settings.json`. Logs are described
+  under Diagnostics.
 - The exe is unsigned, so SmartScreen warns on first run.
 
 ## Ways in
@@ -220,6 +258,7 @@ Builds run in CI only:
 4. Run `Photo2PDF.exe --selftest`. It covers:
    - OCR of a sideways page
    - folder grouping
+   - building a problem-report zip
    - an angled, upside-down Dutch letter, which must be straightened,
      turned upright and named correctly
 5. Build the Inno Setup installer: per-user, no admin, with Start menu,

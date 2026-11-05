@@ -78,17 +78,9 @@ def save_options(opts: Options, scan: ScanSettings | None = None) -> None:
 
 
 def _setup_logging() -> Path:
-    log = _data_dir() / "log.txt"
-    try:
-        if log.exists() and log.stat().st_size > 1_000_000:
-            log.unlink()
-    except OSError:
-        pass
-    logging.basicConfig(
-        filename=log, level=logging.INFO, encoding="utf-8",
-        format="%(asctime)s %(levelname)s %(message)s",
-    )
-    return log
+    from photo2pdf import diag
+
+    return diag.setup()
 
 
 def reveal(path: Path) -> None:
@@ -137,7 +129,20 @@ class App:
 
         self.root.title(APP_NAME)
         self.root.minsize(520, 600)
+        from photo2pdf import diag
+
+        diag.hook_tk(self.root)
         self.opts = load_options()
+        threading.Thread(target=lambda: diag.log_session_header(Tesseract.find(), self.opts),
+                         name="session-header", daemon=True).start()
+        menubar = tk.Menu(self.root)
+        helpm = tk.Menu(menubar, tearoff=0)
+        helpm.add_command(label="Report a problem or idea…", command=self.report_dialog)
+        helpm.add_command(label="Open the log folder", command=lambda: open_file(diag.log_dir()))
+        helpm.add_separator()
+        helpm.add_command(label=f"About {APP_NAME}", command=self._about)
+        menubar.add_cascade(label="Help", menu=helpm)
+        self.root.configure(menu=menubar)
         self.events: queue.Queue = queue.Queue()
         self.busy = False
         self.last_outputs: list[Path] = []
@@ -316,7 +321,20 @@ class App:
         else:
             self.status.configure(text="Nothing was saved.")
         if res.warnings:
-            messagebox.showwarning(APP_NAME, "\n\n".join(res.warnings[:10]), parent=self.root)
+            offer_report(self, "\n\n".join(res.warnings[:10]), parent=self.root)
+
+    # -- problem reports ------------------------------------------------------
+
+    def _about(self) -> None:
+        from tkinter import messagebox
+
+        from photo2pdf import diag
+
+        messagebox.showinfo(APP_NAME, f"{APP_NAME} {__version__}\n\nWorks entirely on this computer.\n"
+                            f"Log folder:\n{diag.log_dir()}", parent=self.root)
+
+    def report_dialog(self, preset: str = "") -> None:
+        ReportDialog(self, preset)
 
     def _open_last(self) -> None:
         if self.last_outputs:
@@ -395,6 +413,18 @@ def selftest(out_pdf: Path) -> int:
         if shape != [2, 1]:
             return 1
 
+    # Problem report: zip builds and holds the log.
+    import zipfile
+
+    from photo2pdf import diag
+
+    with tempfile.TemporaryDirectory() as td:
+        rep = diag.build_report("selftest", include_fields=False, tess=tess, out_dir=Path(td))
+        names = zipfile.ZipFile(rep).namelist()
+        print(f"report: {sorted(names)}")
+        if "message.txt" not in names or "system.json" not in names:
+            return 1
+
     # Angled, upside-down Dutch letter: straightening, orientation, naming.
     import numpy as np
 
@@ -465,8 +495,76 @@ def main(argv: list[str] | None = None) -> int:
         logging.critical("fatal:\n%s", traceback.format_exc())
         try:
             from tkinter import messagebox
-            messagebox.showerror(APP_NAME, f"The app hit an error. Details were saved to:\n{log}")
+
+            from photo2pdf import diag
+            if messagebox.askyesno(APP_NAME, "The app hit an error and has to close.\n\n"
+                                   "Make a problem report you can email to the person who set this up?"):
+                out = diag.build_report("(automatic report after a crash)", include_fields=False)
+                reveal(out)
         except Exception:  # noqa: BLE001
             pass
         return 1
     return 0
+
+
+def offer_report(app, text: str, parent) -> None:
+    """Show warnings/errors with a one-click way to send a report."""
+    from tkinter import messagebox
+
+    if messagebox.askyesno(APP_NAME, text + "\n\nMake a problem report about this?", parent=parent,
+                           icon="warning", default="no"):
+        app.report_dialog(preset="Something went wrong:\n" + text[:500] + "\n\nWhat I was doing: ")
+
+
+class ReportDialog:
+    """Her message + an explicit choice about name fields -> zip on the Desktop."""
+
+    def __init__(self, app, preset: str = ""):
+        import tkinter as tk
+        from tkinter import ttk
+
+        self.app = app
+        w = self.win = tk.Toplevel(app.root)
+        w.title("Report a problem or idea")
+        w.geometry("560x520")
+        w.transient(app.root)
+        ttk.Label(w, wraplength=520, justify="left", text=(
+            "Describe the problem or the idea. If something went wrong, say what you did "
+            "just before, and which photo or folder it was.")).pack(fill="x", padx=16, pady=(16, 6))
+        self.text = tk.Text(w, height=10, wrap="word", font=("Segoe UI", 10))
+        self.text.pack(fill="both", expand=True, padx=16)
+        if preset:
+            self.text.insert("1.0", preset)
+        self.v_fields = tk.BooleanVar(value=True)
+        ttk.Checkbutton(w, variable=self.v_fields, text="Include recognised dates, senders and "
+                        "document types").pack(anchor="w", padx=16, pady=(8, 0))
+        ttk.Label(w, foreground="#555", text="(helps fix naming problems; untick to leave them out)"
+                  ).pack(anchor="w", padx=40)
+        ttk.Label(w, wraplength=520, justify="left", foreground="#555", text=(
+            "The report is a .zip file saved on your Desktop. It contains the app's log "
+            "(what it did, timings and errors), your settings and this message. It does NOT "
+            "contain your photos, your PDFs, or the text of your documents. Your user name "
+            "is replaced by <user>. Nothing is sent anywhere: you email the file yourself."
+        )).pack(fill="x", padx=16, pady=(6, 8))
+        row = ttk.Frame(w)
+        row.pack(fill="x", padx=16, pady=(0, 16))
+        ttk.Button(row, text="Cancel", command=w.destroy).pack(side="right")
+        ttk.Button(row, text="Create report", command=self.create).pack(side="right", padx=6)
+
+    def create(self) -> None:
+        from tkinter import messagebox
+
+        from photo2pdf import diag
+
+        msg = self.text.get("1.0", "end").strip()
+        try:
+            out = diag.build_report(msg, include_fields=bool(self.v_fields.get()),
+                                    tess=Tesseract.find())
+        except Exception as exc:  # noqa: BLE001
+            logging.exception("report failed")
+            messagebox.showerror(APP_NAME, f"Could not create the report: {exc}", parent=self.win)
+            return
+        self.win.destroy()
+        messagebox.showinfo(APP_NAME, f"Report saved as:\n{out}\n\nAttach this file to an email "
+                            "to the person who set up this app for you.", parent=self.app.root)
+        reveal(out)

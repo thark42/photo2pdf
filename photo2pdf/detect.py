@@ -28,6 +28,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import time
 import os
 import re
 import tempfile
@@ -110,7 +112,10 @@ def _exif_time(im) -> Optional[datetime]:
 def _analyse(path: Path, tess: Tesseract, settings: ScanSettings, opts: Options,
              cached: Optional[dict] = None) -> PhotoInfo:
     """Straighten, OCR, decide document-ness; for documents also orientation + name fields."""
+    from photo2pdf import diag
+
     taken = None
+    t0 = time.perf_counter()
     try:
         with _open_image(path) as raw:
             taken = _exif_time(raw)
@@ -136,12 +141,18 @@ def _analyse(path: Path, tess: Tesseract, settings: ScanSettings, opts: Options,
                     info.rotation = find_rotation(im, tess, opts.language, work, threads=1)
                     info.fields = extract(text_from_tsv(tsv))
         info.is_document = info.words >= settings.min_words
+        logging.info("scan %s: words=%d document=%s rotation=%d cached=%s taken=%s (%.2fs)",
+                     path.name, info.words, info.is_document, info.rotation, cached is not None,
+                     info.taken.isoformat(timespec="minutes"), time.perf_counter() - t0)
+        if info.fields:
+            diag.fields("scan %s fields %s", path.name, info.fields.to_json())
         thumb = rotate_cw(im, info.rotation) if info.is_document else im
         thumb = thumb.copy()
         thumb.thumbnail((THUMB_SIZE, THUMB_SIZE))
         info.thumb = thumb
         return info
     except Exception as exc:  # noqa: BLE001
+        logging.exception("scan failed for %s", path.name)
         return PhotoInfo(path=path, taken=taken or _fallback_time(path), error=str(exc))
 
 
@@ -234,6 +245,8 @@ def scan_folder(
         return info
 
     progress(0, total, f"Found {total} photos")
+    logging.info("scan_folder: %d photos, settings=%s, cache_entries=%d", total, settings, len(cache))
+    t_scan = time.perf_counter()
     # Each Tesseract process is limited to 1 thread; parallelism comes from running several.
     with ThreadPoolExecutor(max_workers=settings.workers) as pool:
         for info in pool.map(job, paths):
@@ -245,6 +258,11 @@ def scan_folder(
     for r in results:
         r.is_document = r.error is None and r.words >= settings.min_words
     results.sort(key=lambda r: (r.taken, natural_key(r.path)))
+    n_doc = sum(r.is_document for r in results)
+    n_err = sum(r.error is not None for r in results)
+    logging.info("scan_folder done: %d checked, %d documents, %d errors, cancelled=%s (%.1fs)",
+                 len(results), n_doc, n_err, bool(cancel and cancel.is_set()),
+                 time.perf_counter() - t_scan)
     return results
 
 

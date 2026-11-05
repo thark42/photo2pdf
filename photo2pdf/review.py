@@ -140,12 +140,17 @@ class ScanWindow:
                     self.busy = False
                     self.status.configure(text=f"Something went wrong: {ev[1]}")
                     self.b_cancel.configure(text="Close", command=self.close)
+                    from photo2pdf.app import offer_report
+
+                    offer_report(self.app, f"Something went wrong: {ev[1]}", parent=self.win)
         except queue.Empty:
             pass
         self.win.after(100, self._poll)
 
     def _on_scanned(self, infos):
         self.plan = Plan.from_scan(infos, self.scan.gap_seconds)
+        logging.info("plan: %d documents, page counts %s, %d other photos",
+                     len(self.plan.groups), [len(g) for g in self.plan.groups], len(self.plan.others))
         errors = [i for i in infos if i.error]
         if self.cancel.is_set():
             self.status.configure(text=f"Stopped early: showing the {len(infos)} photos checked so far.")
@@ -239,7 +244,11 @@ class ScanWindow:
         if self.plan and g < len(self.plan.groups) and g < len(getattr(self, "name_vars", [])):
             typed = self.name_vars[g].get().strip()
             suggested = self.plan.suggested_name(g)[:-4]
-            if typed and typed != suggested:
+            if typed and typed != suggested and self.plan.custom_names.get(
+                    self.plan.groups[g][0].path) != (typed + ".pdf"):
+                from photo2pdf import diag
+
+                diag.fields("review rename doc=%d suggested=%r typed=%r", g + 1, suggested, typed)
                 self.plan.set_name(g, typed)
             elif not typed:
                 self.plan.set_name(g, "")
@@ -252,8 +261,29 @@ class ScanWindow:
         if self.busy:
             return
         self._commit_names()
+        self._log_edit(fn.__name__, args)
         fn(*args)
         self.redraw()
+
+    def _log_edit(self, action, args):
+        """Record user corrections: they show where the automatic decisions went wrong."""
+        try:
+            plan = self.plan
+            if action in ("rotate", "move", "split", "remove") and len(args) >= 2:
+                g, i = args[0], args[1]
+                ph = plan.groups[g][i]
+                logging.info("review %s doc=%d page=%d file=%s words=%d rotation_before=%d args=%s",
+                             action, g + 1, i + 1, ph.path.name, ph.words, ph.rotation, args[2:])
+            elif action in ("join_previous", "remove_group"):
+                g = args[0]
+                logging.info("review %s doc=%d pages=%s", action, g + 1,
+                             [p.path.name for p in plan.groups[g]])
+            elif action == "add":
+                ph = plan.others[args[0]]
+                logging.info("review add-as-document file=%s words=%d (detector said no)",
+                             ph.path.name, ph.words)
+        except Exception:  # noqa: BLE001 - logging must never break the UI
+            logging.exception("could not log review edit")
 
     def _page_menu(self, event, g, i):
         from photo2pdf.app import open_file
@@ -334,7 +364,9 @@ class ScanWindow:
         if n:
             open_file(self.out_dir)
         if res.warnings:
-            messagebox.showwarning("Photos to PDF", "\n\n".join(res.warnings[:10]), parent=self.win)
+            from photo2pdf.app import offer_report
+
+            offer_report(self.app, "\n\n".join(res.warnings[:10]), parent=self.win)
 
     def close(self):
         self.cancel.set()

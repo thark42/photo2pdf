@@ -17,8 +17,10 @@ the whole batch; the failure is reported as a warning.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
+import time
 import shutil
 import subprocess
 import sys
@@ -325,10 +327,14 @@ def load_page(src: Path, opts: Options, max_edge: int = 5000):
 
             from photo2pdf.geometry import straighten
 
+            t = time.perf_counter()
             arr, info = straighten(np.asarray(im))
             im = Image.fromarray(arr)
+            logging.info("straighten %s: page_found=%s skew=%.1f out=%dx%d (%.2fs)", src.name,
+                         info["quad"] is not None, info["skew"], im.width, im.height,
+                         time.perf_counter() - t)
         except ImportError:
-            pass  # OpenCV missing: skip straightening, everything else still works
+            logging.warning("OpenCV not available; straightening skipped")
     return im
 
 
@@ -354,6 +360,7 @@ def find_rotation(im, tess: Tesseract, language: str, work: Path,
     small.save(probe)
     osd = tess.osd(probe)
     if osd and osd[1] >= osd_confident:
+        logging.info("rotation=%d via OSD (confidence %.2f)", osd[0], osd[1])
         return osd[0]
     counts = {}
     for deg in (0, 90, 180, 270):
@@ -362,9 +369,12 @@ def find_rotation(im, tess: Tesseract, language: str, work: Path,
     ranked = sorted(counts.items(), key=lambda kv: -kv[1])
     (best, n1), (_, n2) = ranked[0], ranked[1]
     if n1 >= 5 and n1 >= 1.3 * max(n2, 1):
+        logging.info("rotation=%d via word vote %s (OSD said %s)", best, counts, osd)
         return best
     if osd and osd[1] >= 0.5:
+        logging.info("rotation=%d via weak OSD %s; vote inconclusive %s", osd[0], osd, counts)
         return osd[0]
+    logging.info("rotation=0 (undecided: OSD %s, vote %s)", osd, counts)
     return 0
 
 
@@ -423,10 +433,18 @@ def _render_pages(
         src = spec.path
         n = start + k
         progress(n, total, f"Page {n + 1} of {total}: {src.name}")
+        t0 = time.perf_counter()
+        try:
+            size_kb = src.stat().st_size // 1024
+        except OSError:
+            size_kb = -1
+        logging.info("page %d/%d: %s (%d KB) rotation_given=%s", n + 1, total, src.name, size_kb,
+                     spec.rotation)
         stem = f"p{n:05d}"  # ASCII temp names: Tesseract is fragile with non-ASCII paths
         try:
             im = load_page(src, opts)
         except Exception as exc:  # noqa: BLE001 - report and keep going
+            logging.exception("could not read %s", src.name)
             result.warnings.append(f"Skipped {src.name}: could not read image ({exc})")
             continue
         rotation = spec.rotation
@@ -436,16 +454,20 @@ def _render_pages(
                 try:
                     rotation = find_rotation(im, tess, opts.language, work)
                 except Exception as exc:  # noqa: BLE001
+                    logging.exception("rotation check failed for %s", src.name)
                     result.warnings.append(f"{src.name}: could not check rotation ({exc})")
         jpg = finish_page(im, opts, rotation, work / f"{stem}.jpg")
         if tess and opts.ocr:
             try:
                 pdf = tess.render_pdf(jpg, opts.language)
             except Exception as exc:  # noqa: BLE001
+                logging.exception("OCR failed for %s", src.name)
                 result.warnings.append(f"{src.name}: text recognition failed ({exc}); saved without text")
                 pdf = _image_only_pdf(jpg)
         else:
             pdf = _image_only_pdf(jpg)
+        logging.info("page %d done: rotation=%d ocr=%s (%.2fs)", n + 1, rotation,
+                     bool(tess and opts.ocr), time.perf_counter() - t0)
         pages.append((src, pdf))
     return pages
 
@@ -463,7 +485,11 @@ def _content_name(page_pdfs: list[Path]) -> Optional[str]:
         except Exception:  # noqa: BLE001
             continue
     f = merge(fields)
-    return suggest_name(f, "") or None if not f.empty() else None
+    from photo2pdf import diag
+
+    name = suggest_name(f, "") or None if not f.empty() else None
+    diag.fields("quick-mode name fields %s -> %r", f.to_json(), name)
+    return name
 
 
 def _resolve_tess(opts: Options, tesseract: Optional[Tesseract], result: Result) -> Optional[Tesseract]:
@@ -545,5 +571,8 @@ def save_documents(
             out = unique_path(out_dir / name)
             _merge([p for _, p in pages], out)
             result.outputs.append(out)
+            from photo2pdf import diag
+
+            diag.fields("saved document %d: %r (%d pages)", d + 1, out.name, len(pages))
     progress(total, total, "Done")
     return result

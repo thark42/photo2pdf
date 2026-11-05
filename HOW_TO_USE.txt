@@ -86,8 +86,21 @@ TIPS FOR BETTER RESULTS
 - iPhone photos (.HEIC) work as they are.
 
 
-IF SOMETHING GOES WRONG
------------------------
+IF SOMETHING GOES WRONG, OR YOU HAVE AN IDEA
+--------------------------------------------
 
-A log file is kept at:  %APPDATA%\Photo2PDF\log.txt
-(paste that into the File Explorer address bar to find it).
+In the app, click Help > "Report a problem or idea...". Type what happened
+(or what you'd like), click "Create report", and a .zip file appears on
+your Desktop. Attach it to an email to the person who set up this app.
+
+When the app runs into a problem it offers to make this report for you.
+
+The report contains the app's own notes about what it did (which photos it
+looked at, how long things took, any errors) and your settings. It does
+not contain your photos, your PDFs or the text of your letters. You can
+choose whether to include the dates, senders and document types the app
+recognised. Nothing is sent automatically.
+
+The notes themselves are kept in:  %LOCALAPPDATA%\Photo2PDF\logs
+(Help > "Open the log folder"). Old notes are deleted automatically, so
+they never take more than about 6 MB.
