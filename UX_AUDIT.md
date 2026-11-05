@@ -17,6 +17,39 @@ plain-language errors, and platform conventions.
 - No real user and no real archive were involved.
 - Anything marked *(verify on Windows)* is inferred, not observed.
 
+## Status after v0.5.0
+
+| Finding | Status |
+|---|---|
+| B1 Save off-screen | Fixed. The window is sized to the screen and the action bar is packed first. Checked at 1366×697. |
+| B2 Edits lost on close | Fixed. Confirmation before closing the review or main window with unsaved work or a running job. |
+| B3 Duplicates | Fixed. A saved-documents record; already-saved documents start unticked under "Already saved"; a stopped save writes no partial document. |
+| B4 Multi-folder drop | Fixed. Any folder in a drop or Send To opens folder mode with all of them. |
+| H1 Language | Decided: English UI. |
+| H2 Hidden page actions | Fixed. Visible buttons under each page, right-click menu, one-line hint. |
+| H3 Preview | Fixed. Large in-app preview of the processed page, with turn buttons and previous/next. |
+| H4 Undo | Fixed. Undo button and Ctrl+Z, 50 steps. |
+| H5 Time estimate | Fixed. Time remaining is shown; the scanning screen explains Stop and resume; Windows is kept awake. |
+| H6 Wording and nagging | Fixed. Plain summaries with optional details; a report is offered only for unexpected errors. |
+| H7 Unwritable folder | Fixed. Checked before saving; offers the Documents fallback. |
+| M1 Mixed main window | Fixed. Two clear choices; options moved to Settings. |
+| M2 Concurrent runs | Fixed. One scan window at a time; other actions are blocked while busy. |
+| M3 No Stop in quick mode | Fixed. |
+| M4 Doesn't scale | Fixed with paging (12 documents per page) and tabs. |
+| M5 Others capped at 60 | Fixed. Paged; all are reachable. |
+| M6 Searchable vs naming | The label now says "also needed for automatic names". |
+| M7 Per-photo naming | Fixed. |
+| M8 DPI | DPI awareness declared and sizes scaled. Not yet seen on a scaled Windows display. |
+| L2 Contrast | Fixed for the new colours (`#444` and `#555` text, darker green). |
+| Thumbnail not refreshing after rotate (found while fixing) | Fixed. The image cache is keyed by the thumbnail object. |
+| Remaining L items | Open; waiting for user feedback. |
+
+New for the use case:
+- organize into per-year, per-sender, or sender-then-year folders
+  (default per year)
+- include subfolders by default, skipping hidden and system folders
+- a "Restore recommended" button in Settings
+
 Severity:
 - **B** = blocker for the test (likely to derail it or lose work)
 - **H** = high (will confuse or cost real time)

@@ -1,106 +1,94 @@
 PHOTOS TO PDF
 =============
 
-Turns photos of documents (Dutch or English) into searchable PDF files.
-Everything happens on this computer: nothing is uploaded anywhere, and it
-works without internet.
+Turns photos of letters and documents (Dutch or English) into tidy,
+searchable PDF files with clear names, sorted into folders.
+
+Everything happens on this computer. Nothing is uploaded, it works
+without internet, and your photos are never moved, changed or deleted.
 
 
-THREE WAYS TO USE IT
---------------------
+THE MAIN THING: ORGANIZE A FOLDER OF PHOTOS
+-------------------------------------------
 
-1. Right-click
-   Select one or more photos in File Explorer, right-click,
-   choose "Send to" > "Photos to PDF".
-   (On Windows 11, click "Show more options" first to see "Send to".)
+1. Open Photos to PDF and click "Organize a folder of photos".
+   Choose the folder where your photos are. Folders inside it are
+   included too.
+   (Or: drag the folder onto the app window, or right-click the folder >
+   Send to > Photos to PDF.)
 
-2. Drag and drop
-   Drag photos (or a whole folder) onto the "Photos to PDF" icon on the
-   desktop, or into the app window.
+2. Wait while it looks through your photos. It finds the letters and
+   documents, straightens pages photographed at an angle, turns them the
+   right way up and reads their date and sender.
+   This takes a second or two per photo, so a big folder can take a while.
+   Your computer won't go to sleep meanwhile. You can press Stop at any
+   time: the next time you open the same folder, it continues where it
+   left off.
 
-3. Open the app
-   Start menu > "Photos to PDF", then click the big box and pick photos.
+3. Check what it found. Each document shows its pages and a name such as
+       2025-03-14 Belastingdienst - Voorlopige aanslag inkomstenbelasting 2025
+   - Click a page to see it large.
+   - The small buttons under a page turn it left or right, start a new
+     document from that page, or remove it.
+   - Click the name to change it.
+   - "Join with document before" puts two documents back together.
+   - "Not a document" leaves something out.
+   - Untick "Save this document" to skip it for now.
+   - Made a mistake? Press Undo.
+   - Under "Not documents" you'll find the photos it left out. Click one
+     if it is actually a document.
 
-The PDF is saved in the same folder as the photos, and that folder opens
-automatically with the new PDF highlighted.
+4. Press Save. The PDFs go into a folder called "PDFs" inside the folder
+   you chose, sorted into one folder per year (you can change this at the
+   bottom of the window: per year, per sender, or all together).
 
-
-FIND THE DOCUMENTS IN A FOLDER OF PHOTOS
-----------------------------------------
-
-Got a folder with a mix of holiday snaps and photos of letters, bills or
-receipts? Click "Find the documents in a folder of photos..." (or drag
-the folder into the window, or right-click the folder > Send to >
-Photos to PDF).
-
-Tick "include its subfolders" first if your photos are spread over
-several folders.
-
-The app looks at every photo and picks out the ones with a page of text
-in them. It straightens pages that were photographed at an angle and
-turns sideways or upside-down pages the right way up. Photos taken within
-a few minutes of each other become one multi-page PDF; a gap, an ordinary
-photo in between, or a page from a different sender starts a new one.
-
-It also reads each letter to suggest a file name, for example:
-   2025-03-14 Belastingdienst - Voorlopige aanslag inkomstenbelasting 2025
-When the date, sender or type isn't clear, it uses a plain name like
-"Document 03 - 2025-03-15 10.15 (2 pages)" instead.
-
-You then get a screen showing what it found:
-- Click a page to rotate it, move it left/right, start a new document
-  from it, or remove it.
-- Click a file name to change it.
-- "Join with document above" merges two documents into one.
-- "Not a document" drops a whole group.
-- Under "Other photos", click a photo that the app missed to add it.
-
-Click "Save" and the PDFs go into a "PDFs" folder inside the photo folder
-(you can change this). Nothing is moved or deleted; your photos stay as
-they are.
-
-Checking takes about a second per photo, so a big folder takes a while.
-Doing the same folder again later is much quicker.
+Do it again whenever you like. Documents already saved are remembered and
+won't be saved twice: they appear under "Already saved". New photos show
+up as new documents.
 
 
-OPTIONS (in the app window; remembered for next time)
------------------------------------------------------
+FOR ONE LETTER: MAKE ONE PDF FROM A FEW PHOTOS
+----------------------------------------------
 
-- One PDF for all photos, or a separate PDF for each photo.
-  Pages are ordered by file name, which for phone photos is the order
-  they were taken.
-- Make text searchable: lets you search the PDF and copy text out of it.
-  Also turns sideways or upside-down pages the right way up.
-  Takes a few seconds per page.
-- Black and white: evens out shadows so the page looks like a scan, and
-  makes smaller files. Best for plain text documents.
+Click "Make one PDF from a few photos" and pick the photos of the pages.
+(Or drag the photos onto the window, or select them in File Explorer,
+right-click > Send to > Photos to PDF.)
+One PDF appears next to the photos, named from the letter when possible.
+On Windows 11, "Send to" is under "Show more options".
 
 
-TIPS FOR BETTER RESULTS
------------------------
+SETTINGS
+--------
 
-- Pages photographed at an angle are straightened automatically, as long
-  as all four corners of the page are in the photo and the page stands
-  out from what it's lying on. Curved pages (open books) and folded pages
-  are not flattened.
+The recommended settings are already chosen. In Settings you can change:
+- how the PDFs are arranged (per year, per sender, both, or all together)
+- whether folders inside the chosen folder are included
+- one PDF for all photos, or one PDF per photo (for the "few photos" option)
+- searchable PDFs, straightening, and black-and-white "scan" look
+
+
+TIPS
+----
+
+- Straightening works best when all four corners of the page are in the
+  photo and the page stands out from what it's lying on. Curved pages
+  (open books) and folded pages are not flattened.
 - iPhone photos (.HEIC) work as they are.
+- If a name is wrong, just type a better one before pressing Save.
 
 
 IF SOMETHING GOES WRONG, OR YOU HAVE AN IDEA
 --------------------------------------------
 
-In the app, click Help > "Report a problem or idea...". Type what happened
-(or what you'd like), click "Create report", and a .zip file appears on
-your Desktop. Attach it to an email to the person who set up this app.
+Click Help > "Report a problem or idea...". Type what happened (or what
+you'd like), click "Create report", and a .zip file appears on your
+Desktop. Attach it to an email to the person who set up this app.
 
-When the app runs into a problem it offers to make this report for you.
-
-The report contains the app's own notes about what it did (which photos it
-looked at, how long things took, any errors) and your settings. It does
-not contain your photos, your PDFs or the text of your letters. You can
+The report contains the app's own notes about what it did (which photos
+it looked at, how long things took, any errors) and your settings. It
+does not contain your photos, your PDFs or the text of your letters. You
 choose whether to include the dates, senders and document types the app
 recognised. Nothing is sent automatically.
 
-The notes themselves are kept in:  %LOCALAPPDATA%\Photo2PDF\logs
-(Help > "Open the log folder"). Old notes are deleted automatically, so
-they never take more than about 6 MB.
+The notes are kept in %LOCALAPPDATA%\Photo2PDF\logs (Help > "Open the log
+folder") and never take more than about 6 MB.

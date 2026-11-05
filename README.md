@@ -12,13 +12,17 @@ ships this file too.
 
 - **Quick mode.** Selected photos become one combined PDF, or one PDF per
   photo. The combined PDF is named from its content when that is clear.
-- **Folder mode.** Point the app at a folder of mixed photos, optionally
-  including subfolders. It:
+- **Folder mode** ("Organize a folder of photos", the main action). Point
+  the app at one or more folders of mixed photos; subfolders are included
+  by default, and hidden/system folders are skipped. It:
   1. finds which photos are documents
   2. straightens them and turns them upright
   3. groups multi-page letters
   4. suggests a name for each PDF from the letter itself
-  5. shows a review screen, then saves to `<folder>\PDFs`
+  5. shows a review screen, then saves to `<folder>\PDFs\<year>\…`
+     (or per sender, sender then year, or flat)
+  6. remembers what was saved, so running it again on the same folder
+     only offers new documents
 
 ## Page pipeline (both modes)
 
@@ -94,15 +98,41 @@ call can be fixed before saving.
   rotation and the extracted name fields per file (keyed by path, size,
   mtime, language and the straighten setting). It never stores the full
   OCR text. Delete the file to clear it.
-- **Review screen:**
-  - pages are shown straightened and upright
-  - each page can be rotated, moved, split into a new document, or removed
-  - documents can be joined
-  - a missed photo can be promoted to a document
-  - each PDF's file name is editable
-- **Advanced settings:** in `%APPDATA%\Photo2PDF\settings.json` under
-  `"scan"`: `min_words`, `gap_seconds`, `recursive`. The GUI only has the
-  subfolders checkbox.
+- **Review screen** (`review.py`):
+  - **Tabs:** "New documents", "Already saved", "Not documents". Each is
+    paged (12 documents or 36 photos per page), so a large archive stays
+    responsive.
+  - **Per document:**
+    - a "Save this document" tick-box, so a document can be skipped
+    - an editable name, and the target folder shown next to it
+    - "Join with document before" and "Not a document"
+  - **Per page:**
+    - visible buttons to turn left, turn right, start a new document
+      here, or remove the page
+    - right-click for the full menu
+    - click for a large preview of the processed page, exactly as it will
+      be saved
+  - **Undo** (button or Ctrl+Z) covers every edit since the last save.
+  - **Action bar:** packed first, so Save and Close stay visible on a
+    1366×768 screen. The window is sized to fit the screen.
+  - **Before saving:** if the save folder isn't writable, it offers
+    `Documents\Photos to PDF` instead.
+  - **Closing safely:** closing with unsaved documents or edits asks
+    first. So does closing the main window during a scan or save.
+- **Saved-documents record** (`registry.py`):
+  `%LOCALAPPDATA%\Photo2PDF\saved.json` maps each photo (path, size,
+  mtime) to the PDF it went into.
+  - Documents whose photos are all recorded, and whose PDF still exists,
+    start unticked under "Already saved".
+  - Deleting a PDF makes its photos new again.
+  - A stopped save never writes a half document; Save afterwards only
+    writes what's left.
+- **Long runs:** the window shows an estimate of the time remaining and
+  keeps Windows from sleeping (`SetThreadExecutionState`).
+- **Settings dialog:** how PDFs are arranged, whether to include
+  subfolders, one PDF vs one per photo (quick mode), searchable,
+  straighten, and black and white. "Restore recommended" resets them.
+  `min_words` and `gap_seconds` stay in `settings.json` under `"scan"`.
 
 ## Naming from content (`naming.py`)
 
@@ -223,7 +253,14 @@ Expect misses. The review screen is where they get fixed.
 ## Behaviour
 
 - Quick mode orders pages by natural filename sort, because Windows
-  doesn't pass Send-To or drag-and-drop arguments in a reliable order.
+  doesn't pass Send-To or drag-and-drop arguments in a reliable order. It
+  has a Stop button. A stopped quick conversion saves nothing, because
+  half a document is worse than none.
+- Both modes name PDFs from their content when that is clear, including
+  one-PDF-per-photo. Otherwise they keep the photo name.
+- End-of-run messages are plain language ("1 photo could not be opened
+  and was left out"), with a "Show details" list. A "Report this
+  problem" button appears only for unexpected errors.
 - Existing files are never overwritten; a second save gets ` (2)` added to
   its name. Source photos are never moved or deleted.
 - If the photo folder isn't writable, quick mode saves to
@@ -237,12 +274,19 @@ Expect misses. The review screen is where they get fixed.
 
 ## Ways in
 
-- Explorer: right-click photos → **Send to → Photos to PDF** for quick mode.
-  Right-click a folder → Send to opens folder mode.
-- Drag photos onto the desktop shortcut or into the window for quick mode.
-  Drag a single folder for folder mode.
-- In the window: click the drop area, or click "Find the documents in a
-  folder of photos…".
+- **Main window:** two buttons, "Organize a folder of photos" (primary)
+  and "Make one PDF from a few photos". Settings and Help are at the
+  bottom and in the menus.
+- **Drag and drop:** onto the window or the desktop shortcut. Anything that
+  includes a folder (one or several) opens folder mode. Only plain photos
+  use quick mode.
+- **Explorer:** select photos or folders, right-click → **Send to →
+  Photos to PDF**. The same routing applies.
+- **One scan window at a time:** starting another action while one is open
+  brings it to the front.
+- **Display:** the app declares DPI awareness so Windows doesn't
+  bitmap-stretch it at 125–150% scaling, and thumbnails and icons scale
+  with the DPI. This hasn't been checked on a real scaled display yet.
 
 ## Build
 

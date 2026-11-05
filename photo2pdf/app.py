@@ -1,11 +1,11 @@
 """Tkinter front end.
 
 Ways in:
-  * Double-click the app, then drag photos onto the window or click to choose.
-  * Select photos in Explorer -> right-click -> Send to -> Photos to PDF.
-  * Drag photos onto the desktop shortcut.
-The last two pass file paths as arguments; conversion starts immediately
-with the last-used settings.
+  * Double-click the app: "Organize a folder of photos" or "Make one PDF from a few photos".
+  * Drag a folder or photos onto the window or the desktop shortcut.
+  * Explorer: select photos or a folder -> right-click -> Send to -> Photos to PDF.
+Anything that includes a folder opens folder (organize) mode; plain photos
+make one PDF with the last-used settings.
 
 `--selftest <out.pdf>` runs a headless end-to-end check (used by CI on the
 built .exe) and exits 0/1.
@@ -47,7 +47,8 @@ def load_options() -> Options:
     opts = Options()
     try:
         saved = json.loads((_data_dir() / "settings.json").read_text("utf-8"))
-        for k in ("combine", "ocr", "grayscale", "auto_rotate", "straighten", "language", "auto_name"):
+        for k in ("combine", "ocr", "grayscale", "auto_rotate", "straighten", "language", "auto_name",
+                  "organize"):
             if k in saved:
                 setattr(opts, k, saved[k])
     except (OSError, ValueError):
@@ -113,11 +114,15 @@ def open_file(path: Path) -> None:
 # --------------------------------------------------------------------------
 
 class App:
+    """Main window: two clear choices, drop anywhere, settings tucked away."""
+
     def __init__(self, initial_files: list[str]):
         import tkinter as tk
         from tkinter import ttk
 
-        self.tk = tk
+        from photo2pdf import diag, ui
+
+        self.tk, self.ttk, self.ui = tk, ttk, ui
         self.dnd_files = None
         try:
             from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -126,164 +131,189 @@ class App:
         except Exception:  # noqa: BLE001 - drag-and-drop is optional
             logging.exception("tkinterdnd2 unavailable; drag-and-drop disabled")
             self.root = tk.Tk()
+        self.s = ui.scale_of(self.root)
 
         self.root.title(APP_NAME)
-        self.root.minsize(520, 600)
-        from photo2pdf import diag
-
         diag.hook_tk(self.root)
         self.opts = load_options()
+        self.scan = load_scan_settings()
+        self.events: queue.Queue = queue.Queue()
+        self.busy = False
+        self.cancel = threading.Event()
+        self.last_outputs: list[Path] = []
+        self.scan_window = None
+        self.eta = ui.Eta()
         threading.Thread(target=lambda: diag.log_session_header(Tesseract.find(), self.opts),
                          name="session-header", daemon=True).start()
+
         menubar = tk.Menu(self.root)
+        filem = tk.Menu(menubar, tearoff=0)
+        filem.add_command(label="Organize a folder of photos…", command=self.choose_folder)
+        filem.add_command(label="Make one PDF from photos…", command=self.choose)
+        filem.add_separator()
+        filem.add_command(label="Settings…", command=self.settings_dialog)
+        filem.add_separator()
+        filem.add_command(label="Exit", command=self.on_close)
+        menubar.add_cascade(label="File", menu=filem)
         helpm = tk.Menu(menubar, tearoff=0)
+        helpm.add_command(label="How to use", command=self._open_help)
         helpm.add_command(label="Report a problem or idea…", command=self.report_dialog)
         helpm.add_command(label="Open the log folder", command=lambda: open_file(diag.log_dir()))
         helpm.add_separator()
         helpm.add_command(label=f"About {APP_NAME}", command=self._about)
         menubar.add_cascade(label="Help", menu=helpm)
         self.root.configure(menu=menubar)
-        self.events: queue.Queue = queue.Queue()
-        self.busy = False
-        self.last_outputs: list[Path] = []
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
-        pad = {"padx": 16, "pady": 6}
         style = ttk.Style(self.root)
-        style.configure("Big.TLabel", font=("Segoe UI", 13))
-        style.configure("Status.TLabel", font=("Segoe UI", 10))
+        style.configure("Big.TButton", font=("Segoe UI", 13, "bold"), padding=(14, 12))
+        style.configure("Mid.TButton", font=("Segoe UI", 11), padding=(12, 8))
 
-        # Drop zone
-        self.drop = tk.Label(
-            self.root,
-            text=self._idle_text(True),
-            font=("Segoe UI", 14), relief="groove", bd=2,
-            bg="#f4f6f8", fg="#333", cursor="hand2", height=7,
-        )
-        self.drop.pack(fill="both", expand=True, padx=16, pady=(16, 8))
-        self.drop.bind("<Button-1>", lambda e: self.choose())
+        outer = ttk.Frame(self.root, padding=(20, 16, 20, 14))
+        outer.pack(fill="both", expand=True)
+        ttk.Label(outer, text="Photos to PDF", font=("Segoe UI", 18, "bold")).pack(anchor="w")
+        ttk.Label(outer, foreground="#444", font=("Segoe UI", 10), wraplength=int(500 * self.s), text=(
+            "Turns photos of letters and documents into tidy, searchable PDFs with clear names. "
+            "Everything stays on this computer.")).pack(anchor="w", pady=(2, 14))
+
+        def choice(parent, button_text, style_name, desc, command):
+            box = ttk.Frame(parent)
+            box.pack(fill="x", pady=(0, 12))
+            b = ttk.Button(box, text=button_text, style=style_name, command=command)
+            b.pack(fill="x")
+            ttk.Label(box, text=desc, foreground="#444", wraplength=int(470 * self.s),
+                      justify="left").pack(anchor="w", pady=(4, 0))
+            return b
+
+        self.b_folder = choice(
+            outer, "Organize a folder of photos", "Big.TButton",
+            "Finds the letters and documents among your photos, straightens them, names them by "
+            "date and sender, and saves them as PDFs. You check everything before anything is saved. "
+            "Your photos are never moved or deleted.", self.choose_folder)
+        self.b_files = choice(
+            outer, "Make one PDF from a few photos", "Mid.TButton",
+            "For a single letter: pick the photos of its pages and get one PDF next to them.",
+            self.choose)
+
+        self.hint = ttk.Label(outer, foreground="#555", text=(
+            "Tip: you can also drag a folder, or some photos, onto this window." if self.dnd_files
+            else ""))
+        self.hint.pack(anchor="w", pady=(0, 8))
+
+        # Quick-mode progress area (hidden until used)
+        self.work = ttk.Frame(outer)
+        self.progress = ttk.Progressbar(self.work, mode="determinate")
+        self.progress.pack(fill="x")
+        self.status = ttk.Label(self.work, text="", wraplength=int(470 * self.s), justify="left")
+        self.status.pack(anchor="w", pady=(4, 4))
+        row = ttk.Frame(self.work)
+        row.pack(fill="x")
+        self.b_stop = ttk.Button(row, text="Stop", command=self._stop)
+        self.b_open = ttk.Button(row, text="Open the PDF", command=self._open_last)
+        self.b_show = ttk.Button(row, text="Show in folder", command=self._reveal_last)
+
+        foot = ttk.Frame(outer)
+        foot.pack(side="bottom", fill="x")
+        ttk.Button(foot, text="Settings…", command=self.settings_dialog).pack(side="left")
+        ttk.Button(foot, text="Help", command=self._open_help).pack(side="left", padx=6)
+
         if self.dnd_files:
-            self.drop.drop_target_register(self.dnd_files)
-            self.drop.dnd_bind("<<Drop>>", self._on_drop)
-        else:
-            self.drop.configure(text=self._idle_text(False))
-        ttk.Button(self.root, text="Find the documents in a folder of photos…",
-                   command=self.choose_folder).pack(fill="x", padx=16, pady=(0, 4))
+            for w in (self.root, outer):
+                w.drop_target_register(self.dnd_files)
+                w.dnd_bind("<<Drop>>", self._on_drop)
 
-        # Options
-        box = ttk.LabelFrame(self.root, text="Options")
-        box.pack(fill="x", **pad)
-        self.v_combine = tk.BooleanVar(value=self.opts.combine)
-        self.v_ocr = tk.BooleanVar(value=self.opts.ocr)
-        self.v_gray = tk.BooleanVar(value=self.opts.grayscale)
-        self.v_straight = tk.BooleanVar(value=self.opts.straighten)
-        self.v_recursive = tk.BooleanVar(value=load_scan_settings().recursive)
-        ttk.Radiobutton(box, text="Put all photos into one PDF", variable=self.v_combine,
-                        value=True).pack(anchor="w", padx=10, pady=2)
-        ttk.Radiobutton(box, text="Make a separate PDF for each photo", variable=self.v_combine,
-                        value=False).pack(anchor="w", padx=10, pady=2)
-        ttk.Checkbutton(box, text="Make text searchable (slower)",
-                        variable=self.v_ocr).pack(anchor="w", padx=10, pady=(8, 2))
-        ttk.Checkbutton(box, text="Black and white, cleaned up like a scan (smaller files)",
-                        variable=self.v_gray).pack(anchor="w", padx=10, pady=2)
-        ttk.Checkbutton(box, text="Straighten pages photographed at an angle",
-                        variable=self.v_straight).pack(anchor="w", padx=10, pady=2)
-        ttk.Checkbutton(box, text="When finding documents in a folder, include its subfolders",
-                        variable=self.v_recursive).pack(anchor="w", padx=10, pady=(2, 8))
-
-        # Progress + result
-        self.progress = ttk.Progressbar(self.root, mode="determinate")
-        self.progress.pack(fill="x", **pad)
-        self.status = ttk.Label(self.root, text="PDFs are saved next to your photos.",
-                                style="Status.TLabel", wraplength=420)
-        self.status.pack(fill="x", **pad)
-        btns = ttk.Frame(self.root)
-        btns.pack(fill="x", padx=16, pady=(0, 16))
-        self.b_open = ttk.Button(btns, text="Open PDF", command=self._open_last, state="disabled")
-        self.b_open.pack(side="left")
-        self.b_folder = ttk.Button(btns, text="Show in folder", command=self._reveal_last,
-                                   state="disabled")
-        self.b_folder.pack(side="left", padx=8)
-
+        ui.fit_window(self.root, 560, 470, 480, 420)
         self.root.after(100, self._poll)
         if initial_files:
             self.root.after(200, lambda: self.start(initial_files))
 
-    @staticmethod
-    def _idle_text(dnd: bool) -> str:
-        if dnd:
-            return ("Drag photos here to make a PDF\n\nor click to choose photos\n\n"
-                    "(drag a folder here to find the documents in it)")
-        return "Click here to choose photos"
-
     # -- input --------------------------------------------------------------
 
+    def _focus_scan_window(self) -> bool:
+        sw = self.scan_window
+        if sw is not None and sw.win.winfo_exists():
+            sw.win.deiconify()
+            sw.win.lift()
+            sw.win.focus_force()
+            return True
+        self.scan_window = None
+        return False
+
     def choose_folder(self) -> None:
-        if self.busy:
+        if self.busy or self._focus_scan_window():
             return
         from tkinter import filedialog
 
-        d = filedialog.askdirectory(parent=self.root, title="Choose a folder of photos")
+        d = filedialog.askdirectory(parent=self.root, title="Choose the folder with your photos")
         if d:
-            self.open_folder(Path(d))
+            self.open_folders([Path(d)])
 
-    def open_folder(self, folder: Path) -> None:
+    def open_folders(self, inputs: list[Path]) -> None:
+        if self.busy or self._focus_scan_window():
+            return
         from photo2pdf.review import ScanWindow
 
-        opts = self._current_options()
-        scan = load_scan_settings()
-        scan.recursive = bool(self.v_recursive.get())
-        save_options(opts, scan)
-        logging.info("folder scan: %s recursive=%s", folder, scan.recursive)
-        ScanWindow(self, folder, opts, scan)
+        logging.info("organize: %d inputs, recursive=%s", len(inputs), self.scan.recursive)
+        self.scan_window = ScanWindow(self, inputs, self.opts, self.scan)
 
     def choose(self) -> None:
-        if self.busy:
+        if self.busy or self._focus_scan_window():
             return
         from tkinter import filedialog
 
         pattern = " ".join(f"*{e}" for e in sorted(IMAGE_EXTS))
         files = filedialog.askopenfilenames(
-            parent=self.root, title="Choose photos",
+            parent=self.root, title="Choose the photos of one document",
             filetypes=[("Photos", pattern), ("All files", "*.*")],
         )
         if files:
             self.start(list(files))
 
     def _on_drop(self, event) -> None:
-        if not self.busy:
-            self.start(list(self.root.tk.splitlist(event.data)))
-
-    # -- work ---------------------------------------------------------------
-
-    def _current_options(self) -> Options:
-        self.opts.combine = bool(self.v_combine.get())
-        self.opts.ocr = bool(self.v_ocr.get())
-        self.opts.grayscale = bool(self.v_gray.get())
-        self.opts.straighten = bool(self.v_straight.get())
-        return self.opts
+        self.start(list(self.root.tk.splitlist(event.data)))
 
     def start(self, files: list[str]) -> None:
-        if len(files) == 1 and Path(files[0]).is_dir():
-            self.open_folder(Path(files[0]))
+        """Entry for drops, Send To and the file picker. Any folder -> organize mode."""
+        if self.busy or self._focus_scan_window():
             return
-        opts = self._current_options()
-        save_options(opts)
+        paths = [Path(f) for f in files]
+        if any(p.is_dir() for p in paths):
+            self.open_folders(paths)
+            return
+        self._start_quick(files)
+
+    # -- quick mode ---------------------------------------------------------
+
+    def _start_quick(self, files: list[str]) -> None:
+        opts = self.opts
         self.busy = True
-        self.b_open.configure(state="disabled")
-        self.b_folder.configure(state="disabled")
-        self.drop.configure(text="Working…", cursor="watch")
+        self.cancel.clear()
+        self.eta = self.ui.Eta()
+        for b in (self.b_open, self.b_show):
+            b.pack_forget()
+        self.b_stop.pack(side="left")
+        self.work.pack(fill="x", pady=(4, 8), before=self.hint)
         self.progress.configure(value=0, maximum=1)
-        logging.info("start: %d inputs, opts=%s", len(files), asdict(opts))
+        self.status.configure(text="Starting…")
+        for b in (self.b_folder, self.b_files):
+            b.state(["disabled"])
+        self.ui.keep_awake(True)
+        logging.info("quick: %d inputs, opts=%s", len(files), asdict(opts))
 
         def work():
             try:
-                res = convert(files, opts, progress=lambda d, t, m: self.events.put(("progress", d, t, m)))
+                res = convert(files, opts, cancel=self.cancel,
+                              progress=lambda d, t, m: self.events.put(("progress", d, t, m)))
                 self.events.put(("done", res))
             except Exception as exc:  # noqa: BLE001
                 logging.error("conversion crashed:\n%s", traceback.format_exc())
                 self.events.put(("error", str(exc)))
 
-        threading.Thread(target=work, daemon=True).start()
+        threading.Thread(target=work, name="quick", daemon=True).start()
+
+    def _stop(self) -> None:
+        self.cancel.set()
+        self.status.configure(text="Stopping…")
 
     def _poll(self) -> None:
         try:
@@ -292,49 +322,71 @@ class App:
                 if ev[0] == "progress":
                     _, done, total, msg = ev
                     self.progress.configure(maximum=max(total, 1), value=done)
-                    self.status.configure(text=msg)
+                    eta = self.eta.text(done, total)
+                    self.status.configure(text=msg + (f"  ·  {eta}" if eta else ""))
                 elif ev[0] == "done":
                     self._finish(ev[1])
                 elif ev[0] == "error":
-                    self._finish(Result(warnings=[f"Something went wrong: {ev[1]}"]))
+                    self._finish(Result(errors=[ev[1]]))
         except queue.Empty:
             pass
         self.root.after(100, self._poll)
 
     def _finish(self, res: Result) -> None:
-        from tkinter import messagebox
-
         self.busy = False
-        self.drop.configure(text=self._idle_text(bool(self.dnd_files)), cursor="hand2")
+        self.ui.keep_awake(False)
+        for b in (self.b_folder, self.b_files):
+            b.state(["!disabled"])
+        self.b_stop.pack_forget()
         self.last_outputs = res.outputs
-        for w in res.warnings:
+        for w in res.warnings + res.detail_lines():
             logging.warning(w)
         if res.outputs:
-            n = len(res.outputs)
             first = res.outputs[0]
-            msg = f"Saved {first.name}\nin {first.parent}" if n == 1 else \
-                  f"Saved {n} PDFs in {first.parent}"
-            self.status.configure(text=msg)
-            self.b_open.configure(state="normal")
-            self.b_folder.configure(state="normal")
-            reveal(first)
+            n = len(res.outputs)
+            self.status.configure(text=f"Saved {first.name}\nin {first.parent}" if n == 1
+                                  else f"Saved {n} PDFs in {first.parent}")
+            self.b_open.pack(side="left")
+            self.b_show.pack(side="left", padx=6)
+            if not res.problems():
+                reveal(first)
         else:
-            self.status.configure(text="Nothing was saved.")
-        if res.warnings:
-            offer_report(self, "\n\n".join(res.warnings[:10]), parent=self.root)
+            self.status.configure(text=" ".join(res.summary_lines()))
+        if res.problems() or res.stopped:
+            self.ui.show_result(self.root, APP_NAME, res.summary_lines(), res.detail_lines(),
+                                offer_report=self._report_from if res.errors else None,
+                                open_label="Show in folder" if res.outputs else None,
+                                on_open=self._reveal_last)
 
-    # -- problem reports ------------------------------------------------------
+    # -- settings -------------------------------------------------------------
+
+    def settings_dialog(self) -> None:
+        SettingsDialog(self)
+
+    # -- problem reports / help ---------------------------------------------------
 
     def _about(self) -> None:
         from tkinter import messagebox
 
         from photo2pdf import diag
 
-        messagebox.showinfo(APP_NAME, f"{APP_NAME} {__version__}\n\nWorks entirely on this computer.\n"
-                            f"Log folder:\n{diag.log_dir()}", parent=self.root)
+        messagebox.showinfo(APP_NAME, f"{APP_NAME} {__version__}\n\nWorks entirely on this computer; "
+                            f"nothing is uploaded.\n\nLog folder:\n{diag.log_dir()}", parent=self.root)
+
+    def _open_help(self) -> None:
+        for root in ([Path(sys.executable).parent] if getattr(sys, "frozen", False) else []) + \
+                [Path(__file__).resolve().parent.parent]:
+            f = root / "HOW_TO_USE.txt"
+            if f.exists():
+                open_file(f)
+                return
+        self._about()
 
     def report_dialog(self, preset: str = "") -> None:
         ReportDialog(self, preset)
+
+    def _report_from(self, text: str) -> None:
+        self.report_dialog(preset="Something went wrong:\n" + text[:800] + "\n\nWhat I was doing: ")
 
     def _open_last(self) -> None:
         if self.last_outputs:
@@ -344,8 +396,108 @@ class App:
         if self.last_outputs:
             reveal(self.last_outputs[0])
 
+    def on_close(self) -> None:
+        from tkinter import messagebox
+
+        sw = self.scan_window
+        why = ""
+        if self.busy:
+            why = "A PDF is still being made."
+        elif sw is not None and sw.win.winfo_exists():
+            why = sw.pending_work()
+        if why and not messagebox.askyesno(
+                APP_NAME, f"{why}\n\nClose Photos to PDF anyway?", parent=self.root,
+                icon="warning", default="no"):
+            return
+        self.cancel.set()
+        if sw is not None and sw.win.winfo_exists():
+            sw.close(force=True)
+        self.ui.keep_awake(False)
+        self.root.destroy()
+
     def run(self) -> None:
         self.root.mainloop()
+
+
+class SettingsDialog:
+    """Everything optional, in one place, with the recommended defaults pre-set."""
+
+    def __init__(self, app: App):
+        import tkinter as tk
+        from tkinter import ttk
+
+        from photo2pdf.detect import ORGANIZE_CHOICES
+
+        self.app = app
+        o, s = app.opts, app.scan
+        w = self.win = tk.Toplevel(app.root)
+        w.title("Settings")
+        w.transient(app.root)
+        w.resizable(False, False)
+        f = ttk.Frame(w, padding=16)
+        f.pack(fill="both", expand=True)
+
+        def section(text):
+            ttk.Label(f, text=text, font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(10, 2))
+
+        section("When organizing a folder")
+        ttk.Label(f, text="Arrange the PDFs:").pack(anchor="w")
+        self.v_org = tk.StringVar(value=ORGANIZE_CHOICES.get(o.organize, ORGANIZE_CHOICES["year"]))
+        ttk.Combobox(f, textvariable=self.v_org, state="readonly", width=30,
+                     values=list(ORGANIZE_CHOICES.values())).pack(anchor="w", pady=(2, 4))
+        self.v_rec = tk.BooleanVar(value=s.recursive)
+        ttk.Checkbutton(f, text="Also look in folders inside the folder", variable=self.v_rec).pack(anchor="w")
+
+        section("When making a PDF from a few photos")
+        self.v_comb = tk.BooleanVar(value=o.combine)
+        ttk.Radiobutton(f, text="Put all the photos into one PDF", variable=self.v_comb, value=True).pack(anchor="w")
+        ttk.Radiobutton(f, text="Make a separate PDF for each photo", variable=self.v_comb, value=False).pack(anchor="w")
+
+        section("Pages")
+        self.v_ocr = tk.BooleanVar(value=o.ocr)
+        ttk.Checkbutton(f, text="Make PDFs searchable (also needed for automatic names)",
+                        variable=self.v_ocr).pack(anchor="w")
+        self.v_str = tk.BooleanVar(value=o.straighten)
+        ttk.Checkbutton(f, text="Straighten pages photographed at an angle", variable=self.v_str).pack(anchor="w")
+        self.v_gray = tk.BooleanVar(value=o.grayscale)
+        ttk.Checkbutton(f, text="Black and white, cleaned up like a scan (smaller files)",
+                        variable=self.v_gray).pack(anchor="w")
+
+        row = ttk.Frame(f)
+        row.pack(fill="x", pady=(16, 0))
+        ttk.Button(row, text="Cancel", command=w.destroy).pack(side="right")
+        ttk.Button(row, text="OK", command=self.ok).pack(side="right", padx=6)
+        ttk.Button(row, text="Restore recommended", command=self.defaults).pack(side="left")
+        w.bind("<Escape>", lambda e: w.destroy())
+        from photo2pdf import ui
+
+        ui.center_on(w, app.root)
+        w.grab_set()
+
+    def defaults(self):
+        from photo2pdf.detect import ORGANIZE_CHOICES
+
+        d = Options()
+        self.v_org.set(ORGANIZE_CHOICES[d.organize])
+        self.v_rec.set(ScanSettings().recursive)
+        self.v_comb.set(d.combine)
+        self.v_ocr.set(d.ocr)
+        self.v_str.set(d.straighten)
+        self.v_gray.set(d.grayscale)
+
+    def ok(self):
+        from photo2pdf.detect import ORGANIZE_CHOICES
+
+        o, s = self.app.opts, self.app.scan
+        o.organize = next((k for k, v in ORGANIZE_CHOICES.items() if v == self.v_org.get()), "year")
+        s.recursive = bool(self.v_rec.get())
+        o.combine = bool(self.v_comb.get())
+        o.ocr = bool(self.v_ocr.get())
+        o.straighten = bool(self.v_str.get())
+        o.grayscale = bool(self.v_gray.get())
+        save_options(o, s)
+        logging.info("settings saved: %s scan=%s", asdict(o), asdict(s))
+        self.win.destroy()
 
 
 # --------------------------------------------------------------------------
@@ -489,6 +641,9 @@ def main(argv: list[str] | None = None) -> int:
         report.write_text(buf.getvalue() + f"exit={code}\n", "utf-8")
         return code
 
+    from photo2pdf import ui
+
+    ui.enable_dpi_awareness()
     try:
         App(argv).run()
     except Exception:  # noqa: BLE001
@@ -528,6 +683,9 @@ class ReportDialog:
         w.title("Report a problem or idea")
         w.geometry("560x520")
         w.transient(app.root)
+        from photo2pdf import ui
+
+        ui.center_on(w, app.root)
         ttk.Label(w, wraplength=520, justify="left", text=(
             "Describe the problem or the idea. If something went wrong, say what you did "
             "just before, and which photo or folder it was.")).pack(fill="x", padx=16, pady=(16, 6))

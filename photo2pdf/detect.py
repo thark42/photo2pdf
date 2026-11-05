@@ -68,7 +68,7 @@ class PhotoInfo:
 class ScanSettings:
     min_words: int = 12
     gap_seconds: int = 180
-    recursive: bool = False
+    recursive: bool = True   # disorganized archives are usually spread over subfolders
     workers: int = max(1, min(8, (os.cpu_count() or 2)))
 
 
@@ -167,9 +167,30 @@ def _fallback_time(path: Path) -> datetime:
         return datetime.fromtimestamp(0)
 
 
+_SKIP_DIRS = {"appdata", "$recycle.bin", "system volume information", "node_modules"}
+
+
+def _walk(folder: Path):
+    """Files under folder, skipping hidden/system folders (".x", "$x", AppData, ...)."""
+    try:
+        entries = list(folder.iterdir())
+    except OSError:
+        return
+    for p in entries:
+        try:
+            if p.is_dir():
+                if p.name.startswith((".", "$")) or p.name.lower() in _SKIP_DIRS:
+                    continue
+                yield from _walk(p)
+            elif p.is_file():
+                yield p
+        except OSError:
+            continue
+
+
 def list_folder(folder: Path, recursive: bool = False) -> list[Path]:
-    it = folder.rglob("*") if recursive else folder.iterdir()
-    return sorted((p for p in it if p.is_file() and p.suffix.lower() in IMAGE_EXTS), key=natural_key)
+    it = _walk(folder) if recursive else (p for p in folder.iterdir() if p.is_file())
+    return sorted((p for p in it if p.suffix.lower() in IMAGE_EXTS), key=natural_key)
 
 
 def list_inputs(paths: list[Path], recursive: bool = False) -> list[Path]:

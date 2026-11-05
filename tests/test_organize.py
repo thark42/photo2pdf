@@ -151,3 +151,19 @@ def test_per_photo_mode_uses_content_names(tmp_path):
 def _tess():
     from photo2pdf.core import Tesseract
     return Tesseract.find()
+
+
+@needs_tess
+def test_rescan_after_save_shows_documents_as_saved_not_new(tmp_path):
+    folder = tmp_path / "archive"
+    folder.mkdir()
+    text_page(folder / "IMG_20250301_100000.jpg")
+    settings = ScanSettings(workers=2)
+    infos = scan_paths([folder], settings, _tess(), opts=Options())
+    plan = Plan.from_scan(infos, 180)
+    docs = [(p, [PageSpec(x.path, x.rotation) for x in plan.groups[g]])
+            for g, p in zip(plan.included_indices(), plan.output_paths("year"))]
+    save_documents(docs, folder / "PDFs", Options(ocr=False))
+
+    again = Plan.from_scan(scan_paths([folder], settings, _tess(), opts=Options()), 180)
+    assert again.is_saved(0) and again.included_indices() == []   # nothing to save twice
