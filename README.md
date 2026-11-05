@@ -134,6 +134,88 @@ call can be fixed before saving.
   straighten, and black and white. "Restore recommended" resets them.
   `min_words` and `gap_seconds` stay in `settings.json` under `"scan"`.
 
+## Cards: ID, passport, driving licence, insurance, bank, loyalty
+
+Card handling is in `geometry.py`, `detect.py` and `naming.py`.
+
+- **Recognising a card.** A card can be recognised two ways:
+  - **By its shape.** The straightened outline has ISO/IEC 7810 ID-1
+    proportions (85.60 × 53.98 mm, ±7%), and at least 2 readable words
+    are found.
+  - **By its text.** If the outline wasn't found, a card keyword or a
+    passport/ID machine-readable zone, plus fewer than 40 words, also
+    counts. The 40-word limit stops a short insurer letter from being
+    taken for a card.
+- **Reading a small card.** Cards with little text are turned upright
+  before being read again. Upside-down and sideways cards otherwise read
+  as noise. Ties in the orientation vote are broken by Tesseract's
+  orientation estimate first, then by a landscape preference.
+- **Front and back.** A card-shaped photo with little or no text, taken
+  within 120 s directly after a card that was recognised on its own
+  evidence, becomes that card's back.
+- **When a new card starts.** A card has at most 2 sides. A new card
+  starts when:
+  - a recognised card type differs from the card so far
+  - a card follows a letter, or a letter follows a card
+
+  So a wallet photographed card after card comes out as separate cards.
+- **Output.** Card PDFs have real-size pages (85.6 × 54 mm), but only
+  when the card's outline was found. They are filed in `Cards/` in every
+  arrangement except "all in one folder".
+- **Name format.** `<Card type> - <Issuer> - valid until <YYYY-MM-DD>.pdf`,
+  for example:
+  - `Health insurance card - Zilveren Kruis - valid until 2026-12-31.pdf`
+  - `Passport - Netherlands - valid until 2031-05-01.pdf`
+  - `Bank card - ING - valid until 2029-08-31.pdf`
+  - `Membership card - Albert Heijn.pdf`
+
+  Without a recognised type, the name falls back to
+  `Card NN - <photo date> (front and back).pdf`.
+- **Card types:**
+  - passport
+  - ID card
+  - driving licence
+  - residence permit
+  - EHIC/GHIC
+  - health insurance card
+  - OV-chipkaart
+  - Museumkaart
+  - library card
+  - bank card
+  - membership / loyalty card
+- **Issuers:**
+  - Dutch health insurers
+  - Dutch banks
+  - common Dutch shops and memberships
+  - for government IDs, the issuing country, taken from the
+    machine-readable zone or from "Koninkrijk der Nederlanden"
+- **Short brand names.** Names that are also ordinary words or first
+  names (ING, NS, PLUS, AH, CZ, …) are matched case-sensitively.
+- **Expiry date.** Taken from:
+  - a verified machine-readable zone: the date is only accepted when its
+    ICAO 9303 check digit matches, which rejects OCR misreads
+  - otherwise a labelled date: "geldig tot", "vervaldatum", "valid until",
+    "expiry", "4b." on driving licences
+  - `MM/YY` on bank cards, read as the end of that month
+
+**Privacy.** The holder's name, document number, BSN and card number are
+read by OCR but never put in file names or logged. The card type, issuer
+and expiry date are logged only as `FIELDS` lines, which the problem
+report can leave out.
+
+**Accuracy is not measured on real cards.** The tests and the self-test
+use generated card images. They cover:
+- an insurance card front and blank back
+- a driving licence photographed upside down
+- a passport with a valid machine-readable zone
+- a bank card
+- a loyalty card
+- the official ICAO specimen machine-readable zone
+
+Real cards add holograms, glare, embossed digits, busy backgrounds, and
+the OCR-B font in the machine-readable zone, which Tesseract's default
+models are not trained on. Expect more misses than with letters.
+
 ## Naming from content (`naming.py`)
 
 Rule-based, Dutch + English. Format:
@@ -200,6 +282,7 @@ run on a real archive yet.
 - **Orientation:** 0/90/180 on generated pages. An angled, upside-down
   photo of a fictional Dutch tax letter was straightened, turned upright
   and named correctly end to end.
+- **Cards:** see the Cards section above.
 - **Detection:** 17 images (generated pages, one real unevenly lit page
   photo, 13 natural photos), all classified correctly.
 - **Naming:** unit tests on fictional Dutch and English letter texts.

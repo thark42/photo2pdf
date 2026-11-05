@@ -44,11 +44,14 @@ from photo2pdf.core import (
     IMAGE_EXTS, Options, Tesseract, _open_image, _resize_long, count_words, find_rotation,
     flatten_lighting, load_page, natural_key, rotate_cw,
 )
-from photo2pdf.naming import DocFields, extract, merge, sanitize, suggest_name, text_from_tsv
+from photo2pdf.naming import (
+    DocFields, extract_any, looks_like_card_text, merge, sanitize, suggest_name, text_from_tsv,
+)
 
 DETECT_LONG_EDGE = 1600
 THUMB_SIZE = 160
-CACHE_VERSION = 2
+CACHE_VERSION = 3
+CARD_BACK_SECONDS = 120   # a low-text card photo this soon after a card is taken as its back
 
 
 @dataclass
@@ -60,6 +63,8 @@ class PhotoInfo:
     rotation: int = 0                     # clockwise turn after straightening
     fields: Optional[DocFields] = None    # date / sender / type from OCR text
     saved_as: Optional[Path] = None       # PDF this photo already went into (registry)
+    card_shape: bool = False              # straightened outline has ID-1 card proportions
+    kind: str = "page"                    # "page" (letters, forms) or "card" (ID, bank, insurance, loyalty)
     error: Optional[str] = None
     thumb: Optional[object] = field(default=None, repr=False, compare=False)  # PIL.Image
     thumb_jpeg: Optional[bytes] = field(default=None, repr=False, compare=False)
@@ -138,7 +143,8 @@ def _analyse(path: Path, tess: Tesseract, settings: ScanSettings, opts: Options,
         if cached is not None:
             info = PhotoInfo(path=path, taken=taken, words=cached["words"],
                              rotation=cached.get("rotation", 0),
-                             fields=DocFields.from_json(cached["fields"]) if cached.get("fields") else None)
+                             fields=DocFields.from_json(cached["fields"]) if cached.get("fields") else None,
+                             card_shape=cached.get("card_shape", False), kind=cached.get("kind", "page"))
         else:
             gray = flatten_lighting(_resize_long(im.convert("L"), DETECT_LONG_EDGE))
             with tempfile.TemporaryDirectory(prefix="photo2pdf-d-") as td:
@@ -149,13 +155,38 @@ def _analyse(path: Path, tess: Tesseract, settings: ScanSettings, opts: Options,
                               cwd=work, timeout=180, threads=1)
                 tsv = r.stdout or ""
                 words = count_words(tsv)
-                info = PhotoInfo(path=path, taken=taken, words=words)
-                if words >= settings.min_words:
-                    info.rotation = find_rotation(im, tess, opts.language, work, threads=1)
-                    info.fields = extract(text_from_tsv(tsv))
-        info.is_document = info.words >= settings.min_words
-        logging.info("scan %s: words=%d document=%s rotation=%d cached=%s taken=%s (%.2fs)",
-                     path.name, info.words, info.is_document, info.rotation, cached is not None,
+                text = text_from_tsv(tsv)
+                card_shape = bool(im.info.get("photo2pdf_card"))
+                pre_rotation = None
+                if card_shape and words < settings.min_words:
+                    # Cards are small and often photographed upside down or sideways; page
+                    # segmentation then reads almost nothing. Turn it upright and read again.
+                    pre_rotation = find_rotation(im, tess, opts.language, work, threads=1,
+                                                 prefer_landscape=True)
+                    if pre_rotation:
+                        rotate_cw(gray, pre_rotation).save(img)
+                        r = tess._run([img.name, "stdout", "-l", opts.language, "--psm", "1", "tsv"],
+                                      cwd=work, timeout=180, threads=1)
+                        tsv = r.stdout or ""
+                        words, text = count_words(tsv), text_from_tsv(tsv)
+                info = PhotoInfo(path=path, taken=taken, words=words, card_shape=card_shape)
+                # Cards carry little text: card proportions, or a card keyword / passport strip,
+                # with a couple of readable words is enough.
+                # Without the outline, ask for more: a card keyword or passport strip and little text
+                # (a short insurer letter mentioning "zorgverzekering" must stay a letter).
+                is_card = words >= 2 and (card_shape or (words < 40 and looks_like_card_text(text)))
+                if is_card:
+                    info.kind = "card"
+                if words >= settings.min_words or is_card:
+                    info.rotation = pre_rotation if pre_rotation is not None else find_rotation(
+                        im, tess, opts.language, work, threads=1, prefer_landscape=is_card)
+                    info.fields = extract_any(text, card_shape=is_card)
+                elif pre_rotation is not None:
+                    info.rotation = pre_rotation   # kept in case it becomes a card's back
+        info.is_document = info.words >= settings.min_words or info.kind == "card"
+        logging.info("scan %s: words=%d document=%s kind=%s card_shape=%s rotation=%d cached=%s taken=%s (%.2fs)",
+                     path.name, info.words, info.is_document, info.kind, info.card_shape, info.rotation,
+                     cached is not None,
                      info.taken.isoformat(timespec="minutes"), time.perf_counter() - t0)
         if info.fields:
             diag.fields("scan %s fields %s", path.name, info.fields.to_json())
@@ -301,7 +332,8 @@ def scan_paths(
             progress(done, total, f"Checked {done} of {total}: {p.name}")
             if use_cache and key and info.error is None:
                 cache[key] = {"words": info.words, "rotation": info.rotation,
-                              "fields": info.fields.to_json() if info.fields else None}
+                              "fields": info.fields.to_json() if info.fields else None,
+                              "card_shape": info.card_shape, "kind": info.kind}
         return info
 
     progress(0, total, f"Found {total} photos")
@@ -316,7 +348,7 @@ def scan_paths(
         _save_cache(cache)
     # Re-apply threshold (cache stores raw word counts so changing min_words needs no rescan).
     for r in results:
-        r.is_document = r.error is None and r.words >= settings.min_words
+        r.is_document = r.error is None and (r.words >= settings.min_words or r.kind == "card")
     results.sort(key=lambda r: (r.taken, natural_key(r.path)))
     from photo2pdf import registry
 
@@ -341,10 +373,18 @@ def _new_letterhead(current: list[PhotoInfo], ph: PhotoInfo) -> bool:
     A follow-on page normally has no letterhead, or repeats the same one; a
     different sender or date means a new letter was photographed right after.
     """
-    if not ph.fields or not current:
+    if not current:
+        return False
+    if ph.kind != current[-1].kind:
+        return True                      # a card next to a letter is never the same document
+    if ph.kind == "card" and len(current) >= 2:
+        return True                      # a card has a front and a back, nothing more
+    if not ph.fields:
         return False
     so_far = merge([p.fields for p in current if p.fields])
     f = ph.fields
+    if ph.kind == "card" and f.doc_type and f.doc_type != so_far.doc_type:
+        return True   # a recognised card type that differs from (or wasn't on) the card so far
     return bool((f.sender and so_far.sender and f.sender != so_far.sender)
                 or (f.date and so_far.date and f.date != so_far.date))
 
@@ -393,6 +433,19 @@ class Plan:
 
     @classmethod
     def from_scan(cls, photos: list[PhotoInfo], gap_seconds: int) -> "Plan":
+        # The back of a card often has almost no text (stripe, barcode, signature panel).
+        # A card-shaped photo taken right after a card front counts as that card's back.
+        # Only a front that is a card on its own evidence can take a back, and only the
+        # photo taken directly after it, so backs never chain onto other backs.
+        prev, prev_is_front = None, False
+        for ph in sorted(photos, key=lambda p: p.taken):
+            is_front = ph.kind == "card" and ph.is_document
+            if (not ph.is_document and ph.card_shape and prev is not None and prev_is_front
+                    and (ph.taken - prev.taken).total_seconds() <= CARD_BACK_SECONDS
+                    and ph.path.parent == prev.path.parent):
+                ph.is_document, ph.kind = True, "card"
+                is_front = False
+            prev, prev_is_front = ph, is_front
         groups = group_documents(photos, gap_seconds)
         others = [p for p in photos if not p.is_document]
         # Near-misses first so the user sees likely mistakes at the top.
@@ -506,16 +559,27 @@ class Plan:
     def fields(self, g: int) -> DocFields:
         return merge([p.fields for p in self.groups[g] if p.fields])
 
+    def is_card(self, g: int) -> bool:
+        return any(p.kind == "card" for p in self.groups[g])
+
     def suggested_name(self, g: int) -> str:
         grp = self.groups[g]
         width = max(2, len(str(len(self.groups))))
         t = grp[0].taken
-        pages = f"{len(grp)} page" + ("s" if len(grp) != 1 else "")
-        fallback = f"Document {g + 1:0{width}d} - {t:%Y-%m-%d %H.%M} ({pages}).pdf"
-        return suggest_name(self.fields(g), fallback)
+        f = self.fields(g)
+        if self.is_card(g):
+            f.kind = "card"
+            sides = "front and back" if len(grp) == 2 else f"{len(grp)} side" + ("s" if len(grp) != 1 else "")
+            fallback = f"Card {g + 1:0{width}d} - {t:%Y-%m-%d %H.%M} ({sides}).pdf"
+        else:
+            pages = f"{len(grp)} page" + ("s" if len(grp) != 1 else "")
+            fallback = f"Document {g + 1:0{width}d} - {t:%Y-%m-%d %H.%M} ({pages}).pdf"
+        return suggest_name(f, fallback)
 
     def folder_for(self, g: int, organize: str) -> str:
         """Subfolder (possibly empty) a document goes into for the chosen organize mode."""
+        if self.is_card(g):
+            return "" if organize == "none" else "Cards"
         f = self.fields(g)
         year = str(f.date.year) if f.date else (str(f.year) if f.year else "Undated")
         sender = sanitize(f.sender) if f.sender else "Other"

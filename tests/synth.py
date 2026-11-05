@@ -93,3 +93,57 @@ def tax_letter(w=1240, h=1754) -> Image.Image:
         d.text((90, y), line, fill=(15, 15, 15), font=f)
         y += 62
     return im
+
+
+def mono(size=40):
+    for name in ("DejaVuSansMono.ttf", "LiberationMono-Regular.ttf", "consola.ttf", "cour.ttf"):
+        try:
+            return ImageFont.truetype(name, size)
+        except OSError:
+            continue
+    return ImageFont.load_default(size)
+
+
+def card(lines, w=1012, h=638, bg=(235, 242, 250), mrz=None, big_first=True) -> Image.Image:
+    """An ID-1 card (85.6 x 54 mm at ~300 dpi) with text lines; optional MRZ lines at the bottom."""
+    im = Image.new("RGB", (w, h), bg)
+    d = ImageDraw.Draw(im)
+    y = 50
+    for i, ln in enumerate(lines):
+        f = font(52 if (i == 0 and big_first) else 34)
+        d.text((60, y), ln, fill=(20, 20, 40), font=f)
+        y += 70 if i == 0 else 52
+    if mrz:
+        f = mono(34 if len(mrz[0]) > 32 else 40)
+        yy = h - 60 * len(mrz) - 20
+        for ln in mrz:
+            d.text((30, yy), ln, fill=(10, 10, 10), font=f)
+            yy += 60
+    return im
+
+
+def mrz_check(field: str) -> str:
+    total = 0
+    for i, ch in enumerate(field):
+        v = int(ch) if ch.isdigit() else (ord(ch) - 55 if ch.isalpha() else 0)
+        total += v * (7, 3, 1)[i % 3]
+    return str(total % 10)
+
+
+def td3(country="NLD", surname="DEVRIES", given="ANNA", number="SPECI2014", birth="850101",
+        sex="F", expiry="310501") -> list[str]:
+    """Fictional passport MRZ (ICAO 9303 TD3) with valid check digits."""
+    l1 = f"P<{country}{surname}<<{given}".ljust(44, "<")[:44]
+    l2 = (number + mrz_check(number) + country + birth + mrz_check(birth) + sex + expiry + mrz_check(expiry))
+    l2 = l2.ljust(42, "<") + "<" + "0"
+    return [l1, l2[:44]]
+
+
+def card_photo(img: Image.Image, seed=0, **pose) -> Image.Image:
+    """A card on a table, shot at an angle (camera model as for pages, card-sized)."""
+    kw = dict(page_mm=(85.6, 53.98), dist=190, focal=2000, tilt_x=25, tilt_y=8, roll=5)
+    kw.update(pose)
+    w, h = img.size
+    if w < h:
+        kw["page_mm"] = (53.98, 85.6)
+    return photo_of(img, camera_corners(**kw), seed=seed)

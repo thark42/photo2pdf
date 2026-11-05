@@ -47,8 +47,9 @@ def load_options() -> Options:
     opts = Options()
     try:
         saved = json.loads((_data_dir() / "settings.json").read_text("utf-8"))
-        for k in ("combine", "ocr", "grayscale", "auto_rotate", "straighten", "language", "auto_name",
-                  "organize"):
+        # Only what the Settings dialog shows. Internal values (OCR language, sizes) always come
+        # from the current version's defaults, so an old settings file can't pin outdated ones.
+        for k in ("combine", "ocr", "grayscale", "straighten", "organize"):
             if k in saved:
                 setattr(opts, k, saved[k])
     except (OSError, ValueError):
@@ -615,6 +616,28 @@ def selftest(out_pdf: Path) -> int:
         names = plan.output_names()
         print(f"letter: doc={infos[0].is_document} rotation={infos[0].rotation} names={names}")
         if names != ["2025-03-14 Belastingdienst - Voorlopige aanslag inkomstenbelasting 2025.pdf"]:
+            return 1
+
+    # Card: insurance card photographed at an angle -> card kind, card folder, real-size name.
+    cardimg = Image.new("RGB", (1012, 638), (235, 242, 250))
+    cd = ImageDraw.Draw(cardimg)
+    y = 50
+    for k, line in enumerate(["Zilveren Kruis", "Zorgpas", "Polisnummer 123456789", "Geldig tot 31-12-2026"]):
+        cd.text((60, y), line, fill="black", font=f_big if k == 0 else f_txt)
+        y += 70 if k == 0 else 52
+    csrc = np.asarray(cardimg)
+    cm = cv2.getPerspectiveTransform(np.float32([[0, 0], [1012, 0], [1012, 638], [0, 638]]),
+                                     np.float32([[620, 420], [1760, 470], [1720, 1230], [580, 1160]]))
+    cshot = np.where(cv2.warpPerspective(np.full((638, 1012), 255, np.uint8), cm, (W, H))[..., None] > 0,
+                     cv2.warpPerspective(csrc, cm, (W, H)), bg).astype(np.uint8)
+    with tempfile.TemporaryDirectory() as td:
+        folder = Path(td)
+        Image.fromarray(cshot).save(folder / "IMG_20250601_120000.jpg")
+        infos = scan_folder(folder, ScanSettings(workers=1), tess, use_cache=False)
+        plan = Plan.from_scan(infos, 180)
+        paths = plan.output_paths("year")
+        print(f"card: kind={infos[0].kind} shape={infos[0].card_shape} paths={paths}")
+        if paths != ["Cards/Health insurance card - Zilveren Kruis - valid until 2026-12-31.pdf"]:
             return 1
     return 0
 

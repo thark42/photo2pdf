@@ -38,6 +38,9 @@ IMAGE_EXTS = {
 # A4 in inches. Used only to pick a DPI so pages open at a sensible size.
 A4_W_IN = 8.27
 A4_H_IN = 11.69
+# ISO/IEC 7810 ID-1 card in inches (85.60 x 53.98 mm): cards come out at real size.
+CARD_W_IN = 85.60 / 25.4
+CARD_H_IN = 53.98 / 25.4
 
 ProgressFn = Callable[[int, int, str], None]
 
@@ -63,6 +66,7 @@ class PageSpec:
 
     path: Path
     rotation: Optional[int] = None
+    kind: Optional[str] = None   # "card" -> real card size; None -> decided from the photo
 
 
 @dataclass
@@ -381,6 +385,7 @@ def load_page(src: Path, opts: Options, max_edge: int = 5000):
             t = time.perf_counter()
             arr, info = straighten(np.asarray(im))
             im = Image.fromarray(arr)
+            im.info["photo2pdf_card"] = bool(info.get("card"))
             logging.info("straighten %s: page_found=%s skew=%.1f out=%dx%d (%.2fs)", src.name,
                          info["quad"] is not None, info["skew"], im.width, im.height,
                          time.perf_counter() - t)
@@ -396,7 +401,8 @@ def rotate_cw(im, degrees: int):
 
 
 def find_rotation(im, tess: Tesseract, language: str, work: Path,
-                  osd_confident: float = 3.0, threads: Optional[int] = None) -> int:
+                  osd_confident: float = 3.0, threads: Optional[int] = None,
+                  prefer_landscape: bool = False) -> int:
     """Clockwise degrees (0/90/180/270) that make the page upright.
 
     1. Tesseract OSD on a cleaned 1600 px greyscale copy; accepted when its
@@ -422,6 +428,16 @@ def find_rotation(im, tess: Tesseract, language: str, work: Path,
     if n1 >= 5 and n1 >= 1.3 * max(n2, 1):
         logging.info("rotation=%d via word vote %s (OSD said %s)", best, counts, osd)
         return best
+    if n1 >= 5:
+        # Close vote: break the tie with a weak OSD answer, then (cards) with landscape.
+        contenders = [d for d, c in ranked if c * 1.3 >= n1]
+        if osd and osd[0] in contenders:
+            logging.info("rotation=%d via close vote %s + OSD %s", osd[0], counts, osd)
+            return osd[0]
+        keep = [d for d in contenders if d in (0, 180)] if (prefer_landscape and im.width >= im.height) else []
+        if len(keep) == 1:
+            logging.info("rotation=%d via close vote %s + landscape", keep[0], counts)
+            return keep[0]
     if osd and osd[1] >= 0.5:
         logging.info("rotation=%d via weak OSD %s; vote inconclusive %s", osd[0], osd, counts)
         return osd[0]
@@ -429,15 +445,20 @@ def find_rotation(im, tess: Tesseract, language: str, work: Path,
     return 0
 
 
-def finish_page(im, opts: Options, rotation: int, dst: Path) -> Path:
-    """Rotate, optionally clean to greyscale, cap resolution, write JPEG with ~A4 DPI."""
+def finish_page(im, opts: Options, rotation: int, dst: Path, kind: Optional[str] = None) -> Path:
+    """Rotate, optionally clean to greyscale, cap resolution, write JPEG with a DPI that gives
+    an A4-sized page, or a real-size card page for ID / bank / insurance / loyalty cards."""
+    card = kind == "card" or (kind is None and im.info.get("photo2pdf_card", False))
     im = rotate_cw(im, rotation)
     im = im.convert("L" if opts.grayscale else "RGB")
     if max(im.size) > opts.max_long_edge:
         im = _resize_long(im, opts.max_long_edge)
     if opts.grayscale:
         im = flatten_lighting(im)
-    w_in, h_in = (A4_W_IN, A4_H_IN) if im.height >= im.width else (A4_H_IN, A4_W_IN)
+    if card:
+        w_in, h_in = (CARD_H_IN, CARD_W_IN) if im.height >= im.width else (CARD_W_IN, CARD_H_IN)
+    else:
+        w_in, h_in = (A4_W_IN, A4_H_IN) if im.height >= im.width else (A4_H_IN, A4_W_IN)
     dpi = max(im.width / w_in, im.height / h_in, 1.0)
     im.save(dst, "JPEG", quality=opts.jpeg_quality, dpi=(dpi, dpi), optimize=True)
     return dst
@@ -509,7 +530,7 @@ def _render_pages(
                     rotation = find_rotation(im, tess, opts.language, work)
                 except Exception as exc:  # noqa: BLE001
                     logging.exception("rotation check failed for %s", src.name)
-        jpg = finish_page(im, opts, rotation, work / f"{stem}.jpg")
+        jpg = finish_page(im, opts, rotation, work / f"{stem}.jpg", kind=spec.kind)
         if tess and opts.ocr:
             try:
                 pdf = tess.render_pdf(jpg, opts.language)
@@ -529,12 +550,16 @@ def _content_name(page_pdfs: list[Path]) -> Optional[str]:
     """Name from the OCR text layer of the first pages, or None if nothing clear was found."""
     from pypdf import PdfReader
 
-    from photo2pdf.naming import extract, merge, suggest_name
+    from photo2pdf.naming import extract_any, merge, suggest_name
 
     fields = []
     for pdf in page_pdfs[:3]:
         try:
-            fields.append(extract(PdfReader(str(pdf)).pages[0].extract_text() or ""))
+            page = PdfReader(str(pdf)).pages[0]
+            text = page.extract_text() or ""
+            # A real-size card page is about 243 x 153 pt; A4 is 595 x 842.
+            small = max(float(page.mediabox.width), float(page.mediabox.height)) < 400
+            fields.append(extract_any(text, card_shape=small))
         except Exception:  # noqa: BLE001
             continue
     f = merge(fields)

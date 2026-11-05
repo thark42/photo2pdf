@@ -13,7 +13,8 @@
    alone.
 2. warp_to_quad: a perspective transform maps the four corners to a
    rectangle. Output aspect comes from the averaged side lengths and snaps
-   to A4 / US Letter when it is within 6%.
+   to A4 / US Letter / ID-1 card when it is within 6%; a result with card
+   proportions is flagged (info["card"]).
 3. estimate_skew / deskew: corrects small leftover rotation (up to +-10
    degrees) by picking the angle that maximises the variance of the
    horizontal projection profile of the text (text lines line up as sharp
@@ -34,6 +35,13 @@ WORK_EDGE = 1000
 INSET_PX = 5  # at WORK_EDGE scale
 A4 = 297 / 210
 LETTER = 11 / 8.5
+ID1 = 85.60 / 53.98   # ISO/IEC 7810 ID-1: ID cards, bank cards, insurance and loyalty cards
+
+
+def is_card_aspect(w: float, h: float, tol: float = 0.07) -> bool:
+    """True when w x h (either orientation) has ID-1 card proportions."""
+    long_, short = max(w, h), max(min(w, h), 1e-6)
+    return abs(long_ / short - ID1) / ID1 <= tol
 
 
 def _cv2():
@@ -196,10 +204,10 @@ def _target_size(q: np.ndarray, image_size: Optional[tuple[int, int]] = None) ->
             w = h * aspect
     long_, short = max(w, h), max(min(w, h), 1.0)
     ratio = long_ / short
-    for std in (A4, LETTER):
-        if abs(ratio - std) / std <= 0.06:
-            short = long_ / std
-            break
+    # Snap to the closest standard shape when within 6% (A4 and ID-1 ranges touch at ~1.49).
+    best = min((A4, LETTER, ID1), key=lambda std: abs(ratio - std) / std)
+    if abs(ratio - best) / best <= 0.06:
+        short = long_ / best
     return (round(long_), round(short)) if w >= h else (round(short), round(long_))
 
 
@@ -246,6 +254,8 @@ def estimate_skew(rgb_or_gray: np.ndarray, limit: float = 10.0) -> float:
     best = float(fine[int(np.argmax(fscores))])
     if abs(best) < 0.3 or max(fscores) < base * 1.10:
         return 0.0
+    if abs(best) >= limit - 0.25:
+        return 0.0   # pinned at the search limit: texture, not text lines (e.g. a blank card on wood)
     return round(best, 1)
 
 
@@ -263,15 +273,17 @@ def rotate_bound(rgb: np.ndarray, angle: float) -> np.ndarray:
 
 def straighten(rgb: np.ndarray, perspective: bool = True, deskew: bool = True) -> tuple[np.ndarray, dict]:
     """Apply perspective correction then deskew. Returns (image, info dict for logging/tests)."""
-    info: dict = {"quad": None, "skew": 0.0}
+    info: dict = {"quad": None, "skew": 0.0, "card": False}
     out = rgb
     if perspective:
         q = find_page_quad(rgb)
         if q is not None:
             out = warp_to_quad(rgb, q)
             info["quad"] = q
+            info["card"] = is_card_aspect(out.shape[1], out.shape[0])
     if deskew:
-        ang = estimate_skew(out)
+        # After a perspective warp only small leftover tilt is plausible.
+        ang = estimate_skew(out, limit=3.0 if info["quad"] is not None else 10.0)
         if ang:
             out = rotate_bound(out, ang)
             info["skew"] = ang

@@ -360,7 +360,10 @@ class ScanWindow:
         cb = ttk.Checkbutton(head, variable=v_inc, text="Save again" if saved else "Save this document",
                              command=lambda: self._edit(plan.set_included, g, bool(v_inc.get())))
         cb.pack(side="left")
-        pages = f"{len(grp)} page{'s' if len(grp) != 1 else ''}"
+        if plan.is_card(g):
+            pages = "card, front and back" if len(grp) == 2 else "card"
+        else:
+            pages = f"{len(grp)} page{'s' if len(grp) != 1 else ''}"
         tk.Label(head, text=f"   {pages}", bg="#ffffff", fg="#555").pack(side="left")
         if not saved or plan.is_included(g):
             ttk.Button(head, text="Not a document",
@@ -597,7 +600,9 @@ class ScanWindow:
             self.out_dir = alt
             self.dest.configure(text=str(alt))
         paths = self.plan.output_paths(self._organize())
-        docs = [(paths[g], [PageSpec(p.path, p.rotation) for p in self.plan.groups[g]]) for g in idx]
+        # Real card-size pages only where the card's outline was found; everything else A4.
+        docs = [(paths[g], [PageSpec(p.path, p.rotation, "card" if p.card_shape else "page")
+                            for p in self.plan.groups[g]]) for g in idx]
         opts, out_dir = self.opts, self.out_dir
         self.busy = True
         ui.keep_awake(True)
