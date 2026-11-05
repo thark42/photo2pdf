@@ -134,6 +134,71 @@ call can be fixed before saving.
   straighten, and black and white. "Restore recommended" resets them.
   `min_words` and `gap_seconds` stay in `settings.json` under `"scan"`.
 
+## What else it recognises (`features.py`, `classify.py`)
+
+Each photo is measured once:
+- OCR word count and confidence, plus text height relative to the image
+- how many lines of text have 5 or more words
+- whether a sheet outline was found, and its proportions
+- ink density
+- sharpness (variance of the Laplacian)
+- QR code and barcode presence (OpenCV `QRCodeDetector` and
+  `barcode.BarcodeDetector`)
+- whether it looks like a screenshot: file name, PNG without camera data,
+  screen proportions
+- an image fingerprint (a 256-bit dHash of the upright page) and a text
+  fingerprint (a 32-value MinHash of the word set, which can't be turned
+  back into the text)
+
+`classify.py` then applies rules in order:
+
+| Type | Recognised by | Folder | Name |
+|---|---|---|---|
+| Screenshot, payment or booking confirmation | screenshot + payment/booking words | `Confirmations/<year>` | `Payment confirmation - ING - 2025-02-01 - EUR 25.00` |
+| Other screenshots | screenshot | not saved ("Screenshot") | |
+| Card | ID-1 outline (see Cards) | `Cards` | |
+| Business card | card outline + phone/e-mail/web, no card type | `Cards` | `Business card - <e-mail or web domain>` (never the person's name; personal mail domains are left out) |
+| Receipt | outline ≥ 2:1 + till words, or ≥ 5 till signals | `Receipts/<year>` | `Receipt - Albert Heijn - 2024-11-02 - EUR 12.16` (page 80 mm wide) |
+| Ticket / boarding pass / parcel label | QR code or barcode + ticket words | `Tickets/<year>` | `Boarding pass - KLM - 2026-07-14` (barcode contents never used) |
+| Envelope | postal markings / postcode, few words, no text lines | not saved ("Envelope") | |
+| Product type plate | no sheet + ≥ 2 of model/type, serial, V/Hz/W/IP, CE | `Product labels` | `Product label - Bosch - WAN28K40-01` (serial numbers never used) |
+| Sign, poster, menu | no sheet + large text (median height > 3% of image) + few long lines | not saved ("Sign or poster") | |
+| Letter / form | ≥ 12 confident words | `<year>` / sender | as before |
+| Blurred sheet | sheet found but sharpness < 60 | kept as a page, flagged "hard to read" | |
+| Handwritten note / whiteboard | sheet found, ink 1–20%, little printed text | `Notes/<year>` | `Note - <photo date>` (handwriting isn't readable by Tesseract, so these aren't searchable) |
+
+**Duplicates.** Document photos of the same thing are grouped. Two photos
+are duplicates when:
+- their image fingerprints differ by 40 bits or fewer out of 256, and
+- where both have text, their text fingerprints match at least 60%
+
+The text check keeps two pages of the same form apart. The copy with more
+readable words, then the sharper one, is kept. The rest go under "Not
+documents" as "Duplicate of …" and can be added back. Nothing is deleted.
+
+**Hard to read.** A document with sharpness below 60, or mean OCR
+confidence below 55, gets a warning in the review screen: "retake if you
+still have the paper".
+
+**Not implemented:** meter readings (dials and displays aren't reliably
+readable by OCR).
+
+**Calibration.** All thresholds were checked on synthetic images only. The
+images covered:
+- a letter, a re-shot copy of it and a blurred copy
+- a different letter
+- a receipt
+- a payment screenshot, an Instagram screenshot and a QR boarding pass
+- a handwritten note
+- a menu board
+- an envelope
+- a type plate
+- a business card
+- a natural photo
+
+All 14 came out right. Each photo's measurements are logged (`features
+<file>: …`) so they can be tuned against real archives.
+
 ## Cards: ID, passport, driving licence, insurance, bank, loyalty
 
 Card handling is in `geometry.py`, `detect.py` and `naming.py`.

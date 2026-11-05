@@ -41,6 +41,7 @@ A4_H_IN = 11.69
 # ISO/IEC 7810 ID-1 card in inches (85.60 x 53.98 mm): cards come out at real size.
 CARD_W_IN = 85.60 / 25.4
 CARD_H_IN = 53.98 / 25.4
+RECEIPT_W_IN = 80 / 25.4   # common till-roll width
 
 ProgressFn = Callable[[int, int, str], None]
 
@@ -66,7 +67,8 @@ class PageSpec:
 
     path: Path
     rotation: Optional[int] = None
-    kind: Optional[str] = None   # "card" -> real card size; None -> decided from the photo
+    kind: Optional[str] = None   # "card" / "receipt" -> real size; "screenshot" -> never warped;
+                                 # "page" -> A4; None -> decided from the photo
 
 
 @dataclass
@@ -386,6 +388,7 @@ def load_page(src: Path, opts: Options, max_edge: int = 5000):
             arr, info = straighten(np.asarray(im))
             im = Image.fromarray(arr)
             im.info["photo2pdf_card"] = bool(info.get("card"))
+            im.info["photo2pdf_quad"] = info.get("quad") is not None
             logging.info("straighten %s: page_found=%s skew=%.1f out=%dx%d (%.2fs)", src.name,
                          info["quad"] is not None, info["skew"], im.width, im.height,
                          time.perf_counter() - t)
@@ -449,6 +452,9 @@ def finish_page(im, opts: Options, rotation: int, dst: Path, kind: Optional[str]
     """Rotate, optionally clean to greyscale, cap resolution, write JPEG with a DPI that gives
     an A4-sized page, or a real-size card page for ID / bank / insurance / loyalty cards."""
     card = kind == "card" or (kind is None and im.info.get("photo2pdf_card", False))
+    w0, h0 = im.size
+    receipt = kind == "receipt" or (kind is None and im.info.get("photo2pdf_quad", False)
+                                    and max(w0, h0) / max(min(w0, h0), 1) >= 2.0)
     im = rotate_cw(im, rotation)
     im = im.convert("L" if opts.grayscale else "RGB")
     if max(im.size) > opts.max_long_edge:
@@ -457,6 +463,11 @@ def finish_page(im, opts: Options, rotation: int, dst: Path, kind: Optional[str]
         im = flatten_lighting(im)
     if card:
         w_in, h_in = (CARD_H_IN, CARD_W_IN) if im.height >= im.width else (CARD_W_IN, CARD_H_IN)
+    elif receipt:
+        short_px = min(im.width, im.height)
+        dpi = max(short_px / RECEIPT_W_IN, 1.0)
+        im.save(dst, "JPEG", quality=opts.jpeg_quality, dpi=(dpi, dpi), optimize=True)
+        return dst
     else:
         w_in, h_in = (A4_W_IN, A4_H_IN) if im.height >= im.width else (A4_H_IN, A4_W_IN)
     dpi = max(im.width / w_in, im.height / h_in, 1.0)
@@ -517,7 +528,18 @@ def _render_pages(
                      spec.rotation)
         stem = f"p{n:05d}"  # ASCII temp names: Tesseract is fragile with non-ASCII paths
         try:
-            im = load_page(src, opts)
+            screenshot = spec.kind == "screenshot"
+            if spec.kind is None:
+                from photo2pdf.features import is_screenshot
+
+                with _open_image(src) as raw:
+                    screenshot = is_screenshot(src, raw, raw.size)
+            page_opts = opts
+            if screenshot:
+                from dataclasses import replace as _replace
+
+                page_opts = _replace(opts, straighten=False)   # screen captures are already flat
+            im = load_page(src, page_opts)
         except Exception as exc:  # noqa: BLE001 - report and keep going
             logging.exception("could not read %s", src.name)
             result.skipped.append(src.name)
@@ -525,12 +547,13 @@ def _render_pages(
         rotation = spec.rotation
         if rotation is None:
             rotation = 0
-            if tess and opts.auto_rotate:
+            if tess and opts.auto_rotate and not screenshot:
                 try:
                     rotation = find_rotation(im, tess, opts.language, work)
                 except Exception as exc:  # noqa: BLE001
                     logging.exception("rotation check failed for %s", src.name)
-        jpg = finish_page(im, opts, rotation, work / f"{stem}.jpg", kind=spec.kind)
+        jpg = finish_page(im, opts, rotation, work / f"{stem}.jpg",
+                          kind=None if spec.kind == "screenshot" else spec.kind)
         if tess and opts.ocr:
             try:
                 pdf = tess.render_pdf(jpg, opts.language)

@@ -147,3 +147,94 @@ def card_photo(img: Image.Image, seed=0, **pose) -> Image.Image:
     if w < h:
         kw["page_mm"] = (53.98, 85.6)
     return photo_of(img, camera_corners(**kw), seed=seed)
+
+
+def receipt(lines=None, w=560, h=1500) -> Image.Image:
+    """Till receipt: narrow, long, small monospace text."""
+    lines = lines or ["ALBERT HEIJN", "Filiaal 1234 Amsterdam", "", "BANANEN          1,99", "MELK HALFVOL     1,19",
+                      "BROOD VOLKOREN   2,49", "KAAS JONG BELEGEN 6,49", "", "SUBTOTAAL       12,16",
+                      "TOTAAL          12,16", "PINNEN          12,16", "BTW 9%           1,00", "",
+                      "02-11-2024 14:32  Kassa 3", "Bedankt en tot ziens"]
+    im = Image.new("RGB", (w, h), (248, 247, 242))
+    d = ImageDraw.Draw(im)
+    f = mono(30)
+    y = 40
+    for ln in lines:
+        d.text((30, y), ln, fill=(30, 30, 30), font=f)
+        y += 46
+    return im
+
+
+def receipt_photo(img=None, seed=0, **pose):
+    img = img or receipt()
+    kw = dict(page_mm=(80, 214), dist=330, focal=2000, tilt_x=18, tilt_y=6, roll=4)
+    kw.update(pose)
+    return photo_of(img, camera_corners(**kw), seed=seed)
+
+
+def screenshot(lines, w=1080, h=2340, qr=None) -> Image.Image:
+    """Phone screenshot (19.5:9) with app-like text; optional QR code."""
+    im = Image.new("RGB", (w, h), (255, 255, 255))
+    d = ImageDraw.Draw(im)
+    d.rectangle([0, 0, w, 120], fill=(255, 102, 0))
+    y = 220
+    for i, ln in enumerate(lines):
+        d.text((70, y), ln, fill=(20, 20, 20), font=font(64 if i == 0 else 46))
+        y += 110 if i == 0 else 80
+    if qr:
+        import cv2
+        import numpy as np
+
+        code = cv2.QRCodeEncoder.create().encode(qr)
+        code = cv2.resize(code, (code.shape[1] * 14, code.shape[0] * 14), interpolation=cv2.INTER_NEAREST)
+        im.paste(Image.fromarray(np.asarray(code)).convert("RGB"), ((w - code.shape[1]) // 2, y + 60))
+    return im
+
+
+def scribbles(w=1240, h=1754, seed=0) -> Image.Image:
+    """A handwritten-looking note: wavy pen strokes in lines, no printed text."""
+    import random
+
+    rnd = random.Random(seed)
+    im = Image.new("RGB", (w, h), (250, 250, 246))
+    d = ImageDraw.Draw(im)
+    for row in range(14):
+        y0 = 150 + row * 95
+        x = 100
+        while x < w - 150:
+            seg = rnd.randint(40, 160)
+            pts = [(x + t, y0 + 14 * __import__("math").sin((x + t) / rnd.uniform(8, 14)) + rnd.uniform(-4, 4))
+                   for t in range(0, seg, 4)]
+            d.line(pts, fill=(25, 35, 110), width=4)
+            x += seg + rnd.randint(20, 45)
+    return im
+
+
+def poster() -> Image.Image:
+    """A sign / menu board photographed straight on: big text, no paper sheet."""
+    im = Image.new("RGB", (2400, 1800), (40, 90, 60))
+    d = ImageDraw.Draw(im)
+    for i, ln in enumerate(["CAFE DE HOEK", "Koffie 2,80", "Thee 2,50", "Appeltaart 4,25",
+                            "Tosti kaas 4,50", "Open dagelijks", "Welkom binnen"]):
+        d.text((200, 120 + i * 230), ln, fill=(250, 250, 240), font=font(150))
+    return im
+
+
+def envelope(w=1100, h=550) -> Image.Image:
+    im = Image.new("RGB", (w, h), (245, 240, 225))
+    d = ImageDraw.Draw(im)
+    d.text((40, 30), "Retouradres: Postbus 1234, 3500 AB Utrecht", fill=(40, 40, 40), font=font(24))
+    d.rectangle([w - 230, 30, w - 40, 140], outline=(40, 40, 40), width=3)
+    d.text((w - 215, 70), "PORT BETAALD", fill=(40, 40, 40), font=font(22))
+    for i, ln in enumerate(["Mevrouw A. de Vries", "Dorpsstraat 12", "1234 AB  Ergenshuizen"]):
+        d.text((450, 260 + i * 50), ln, fill=(20, 20, 20), font=font(34))
+    return im
+
+
+def type_plate() -> Image.Image:
+    im = Image.new("RGB", (1600, 1000), (200, 200, 205))
+    d = ImageDraw.Draw(im)
+    for i, ln in enumerate(["BOSCH", "Type WAN28K40/01", "E-Nr WAN28K40NL  FD 9904", "220-240V 50Hz 2300W",
+                            "Made in Germany   CE   IPX4"]):
+        d.text((120, 120 + i * 150), ln, fill=(20, 20, 20), font=font(80 if i == 0 else 60))
+    return im

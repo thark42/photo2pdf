@@ -552,13 +552,22 @@ def selftest(out_pdf: Path) -> int:
         folder = Path(td)
         page = img
         page.save(folder / "IMG_20260301_100000.jpg")
-        page.rotate(180).save(folder / "IMG_20260301_100030.jpg")
+        page2 = Image.new("RGB", (1700, 2200), "white")   # a different second page, not a duplicate
+        d2 = ImageDraw.Draw(page2)
+        for i in range(12):
+            d2.text((120, 150 + i * 80), f"Second page line {i} lazy dog harbour lantern", fill="black",
+                    font=font)
+        page2.rotate(180).save(folder / "IMG_20260301_100030.jpg")
         noise = Image.new("RGB", (900, 700))
         nd = ImageDraw.Draw(noise)
         for y in range(0, 700, 7):
             nd.line([(0, y), (900, y)], fill=((y * 3) % 255, (y * 7) % 255, 120))
         noise.save(folder / "IMG_20260301_100100.jpg")
-        page.save(folder / "IMG_20260301_100200.jpg")
+        page3 = Image.new("RGB", (1700, 2200), "white")
+        d3 = ImageDraw.Draw(page3)
+        for i in range(12):
+            d3.text((120, 150 + i * 80), f"Third letter line {i} meadow copper violet", fill="black", font=font)
+        page3.save(folder / "IMG_20260301_100200.jpg")
         infos = scan_folder(folder, ScanSettings(workers=2), tess, use_cache=False)
         plan = Plan.from_scan(infos, 180)
         shape = [len(g) for g in plan.groups]
@@ -638,6 +647,35 @@ def selftest(out_pdf: Path) -> int:
         paths = plan.output_paths("year")
         print(f"card: kind={infos[0].kind} shape={infos[0].card_shape} paths={paths}")
         if paths != ["Cards/Health insurance card - Zilveren Kruis - valid until 2026-12-31.pdf"]:
+            return 1
+
+    # Receipt + ticket screenshot with a QR code (checks the bundled QR detector too).
+    from photo2pdf.features import find_codes
+
+    rec = Image.new("RGB", (700, 1300), (248, 247, 242))
+    rd = ImageDraw.Draw(rec)
+    for k, line in enumerate(["ALBERT HEIJN", "BANANEN 1,99", "MELK 1,19", "BROOD 2,49", "KAAS 6,49",
+                              "SUBTOTAAL 12,16", "TOTAAL 12,16", "PINNEN 12,16", "BTW 9% 1,00",
+                              "02-11-2024 14:32 Kassa 3"]):
+        rd.text((40, 40 + k * 70), line, fill="black", font=f_txt)
+    qr = cv2.QRCodeEncoder.create().encode("SELFTEST")
+    qr = cv2.resize(qr, (qr.shape[1] * 14, qr.shape[0] * 14), interpolation=cv2.INTER_NEAREST)
+    shot = Image.new("RGB", (1080, 2340), "white")
+    sd = ImageDraw.Draw(shot)
+    for k, line in enumerate(["KLM", "Boarding pass", "Flight KL1234 Gate D7", "Date 14 July 2026"]):
+        sd.text((70, 220 + k * 90), line, fill="black", font=f_big)
+    shot.paste(Image.fromarray(qr).convert("RGB"), (300, 800))
+    print(f"codes: {find_codes(shot)}")
+    with tempfile.TemporaryDirectory() as td:
+        folder = Path(td)
+        rec.save(folder / "IMG_20250601_130000.jpg")
+        shot.save(folder / "Screenshot_20250601-131500.png")
+        infos = scan_folder(folder, ScanSettings(workers=1), tess, use_cache=False)
+        plan = Plan.from_scan(infos, 180)
+        paths = sorted(plan.output_paths("year"))
+        print(f"receipt/ticket: kinds={[i.kind for i in infos]} paths={paths}")
+        if paths != ["Receipts/2024/Receipt - Albert Heijn - 2024-11-02 - EUR 12.16.pdf",
+                     "Tickets/2026/Boarding pass - KLM - 2026-07-14.pdf"]:
             return 1
     return 0
 

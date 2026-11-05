@@ -280,6 +280,12 @@ class ScanWindow:
 
     # -- rendering ----------------------------------------------------------------
 
+    def _columns(self) -> int:
+        """How many thumbnails fit side by side in the visible width."""
+        self.canvas.update_idletasks()
+        width = max(self.canvas.winfo_width(), int(600 * self.s))
+        return max(2, width // int((THUMB_DISPLAY + 46) * self.s))
+
     def _thumb(self, info):
         from PIL import ImageTk
 
@@ -360,11 +366,18 @@ class ScanWindow:
         cb = ttk.Checkbutton(head, variable=v_inc, text="Save again" if saved else "Save this document",
                              command=lambda: self._edit(plan.set_included, g, bool(v_inc.get())))
         cb.pack(side="left")
+        from photo2pdf.classify import LABELS
+
         if plan.is_card(g):
             pages = "card, front and back" if len(grp) == 2 else "card"
         else:
-            pages = f"{len(grp)} page{'s' if len(grp) != 1 else ''}"
+            what = LABELS.get(plan.kind(g), "")
+            pages = (f"{what} · " if what else "") + f"{len(grp)} page{'s' if len(grp) != 1 else ''}"
         tk.Label(head, text=f"   {pages}", bg="#ffffff", fg="#555").pack(side="left")
+        if plan.hard_to_read(g):
+            hint = tk.Label(head, text="   ⚠ hard to read: retake if you still have the paper",
+                            bg="#ffffff", fg="#8a4b00")
+            hint.pack(side="left")
         if not saved or plan.is_included(g):
             ttk.Button(head, text="Not a document",
                        command=lambda: self._edit(plan.remove_group, g)).pack(side="right", padx=(6, 0))
@@ -383,7 +396,8 @@ class ScanWindow:
                 grid.pack(anchor="w", pady=(4, 0))
                 for i, info in enumerate(grp):
                     lbl = tk.Label(grid, image=self._thumb(info), bg="#ffffff", cursor="hand2")
-                    lbl.grid(row=i // COLUMNS, column=i % COLUMNS, padx=6, pady=4)
+                    cols = self._columns()
+                    lbl.grid(row=i // cols, column=i % cols, padx=6, pady=4)
                     lbl.bind("<Button-1>", lambda e, i=i: self._preview(g, i))
                 return
 
@@ -410,7 +424,8 @@ class ScanWindow:
         tk, ttk = self.tk, self.ttk
         plan = self.plan
         cell = tk.Frame(grid, bg="#ffffff")
-        cell.grid(row=i // COLUMNS, column=i % COLUMNS, padx=6, pady=4, sticky="n")
+        cols = self._columns()
+        cell.grid(row=i // cols, column=i % cols, padx=6, pady=4, sticky="n")
         img = self._thumb(info)
         lbl = tk.Label(cell, image=img, text="(can't show)" if img is None else "", bg="#ffffff",
                        cursor="hand2", relief="solid", bd=1)
@@ -440,21 +455,26 @@ class ScanWindow:
                      fg="#444", font=("Segoe UI", 11)).pack(pady=30)
             return
         tk.Label(self.inner, bg="#ffffff", fg="#444", anchor="w", justify="left", text=(
-            "These photos don't look like documents and will be left alone. The ones most likely "
-            "to be documents are shown first. Click a photo if it is a document."
-        )).pack(fill="x", padx=8, pady=(8, 4))
+            "These photos will be left alone: ordinary photos, envelopes, signs, screenshots that "
+            "aren't confirmations, and second copies of a document. Click a photo if it should be saved."
+        ), wraplength=int(900 * self.s)).pack(fill="x", padx=8, pady=(8, 4))
         grid = tk.Frame(self.inner, bg="#ffffff")
         grid.pack(anchor="w", padx=4)
         start = self.page * OTHERS_PER_PAGE
         for n, k in enumerate(items[start:start + OTHERS_PER_PAGE]):
             info = plan.others[k]
             cell = tk.Frame(grid, bg="#ffffff")
-            cell.grid(row=n // COLUMNS, column=n % COLUMNS, padx=6, pady=6, sticky="n")
+            cols = self._columns()
+            cell.grid(row=n // cols, column=n % cols, padx=6, pady=6, sticky="n")
             img = self._thumb(info)
             lbl = tk.Label(cell, image=img, text=info.path.name if img is None else "",
                            bg="#ffffff", cursor="hand2")
             lbl.pack()
-            tk.Label(cell, text=info.path.name[:24], bg="#ffffff", fg="#666").pack()
+            name = info.path.name if len(info.path.name) <= 20 else info.path.name[:9] + "…" + info.path.name[-9:]
+            tk.Label(cell, text=name, bg="#ffffff", fg="#666").pack()
+            if info.reason:
+                tk.Label(cell, text=_short_reason(info.reason), bg="#ffffff", fg="#8a4b00",
+                         wraplength=int(150 * self.s)).pack()
             lbl.bind("<Button-1>", lambda e, k=k: self._other_menu(e, k))
             lbl.bind("<Button-3>", lambda e, k=k: self._other_menu(e, k))
 
@@ -601,8 +621,14 @@ class ScanWindow:
             self.dest.configure(text=str(alt))
         paths = self.plan.output_paths(self._organize())
         # Real card-size pages only where the card's outline was found; everything else A4.
-        docs = [(paths[g], [PageSpec(p.path, p.rotation, "card" if p.card_shape else "page")
-                            for p in self.plan.groups[g]]) for g in idx]
+        def page_kind(p):
+            if p.screenshot:
+                return "screenshot"
+            if p.kind == "card" and p.card_shape:
+                return "card"
+            return "receipt" if p.kind == "receipt" else "page"
+        docs = [(paths[g], [PageSpec(p.path, p.rotation, page_kind(p)) for p in self.plan.groups[g]])
+                for g in idx]
         opts, out_dir = self.opts, self.out_dir
         self.busy = True
         ui.keep_awake(True)
@@ -681,6 +707,10 @@ class ScanWindow:
         self.win.destroy()
         if getattr(self.app, "scan_window", None) is self:
             self.app.scan_window = None
+
+
+def _short_reason(reason: str) -> str:
+    return "Duplicate (clearer copy kept)" if reason.startswith("Duplicate of") else reason
 
 
 class Preview:

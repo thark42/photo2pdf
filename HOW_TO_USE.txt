@@ -53,6 +53,22 @@ folder, named for example:
    Passport - Netherlands - valid until 2031-05-01
 Names and card or document numbers are never put in the file name.
 
+RECEIPTS, SCREENSHOTS, TICKETS, NOTES AND MORE
+----------------------------------------------
+
+The app also recognises:
+- receipts (kassabonnen) -> "Receipts", named by shop, date and total
+- screenshots of payments or bookings -> "Confirmations"
+- boarding passes, tickets and parcel labels -> "Tickets"
+- handwritten notes and whiteboards -> "Notes" (not searchable)
+- appliance type plates (model and voltage labels) -> "Product labels"
+- business cards -> "Cards"
+Envelopes, signs and menus, other screenshots, and second copies of the
+same document are left out; you'll see them under "Not documents" with
+the reason, and can add any of them back. Photos that are too blurred
+to read are marked "hard to read" so you know to retake them if you
+still have the paper.
+
 Do it again whenever you like. Documents already saved are remembered and
 won't be saved twice: they appear under "Already saved". New photos show
 up as new documents.

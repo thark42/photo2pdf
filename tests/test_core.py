@@ -24,11 +24,21 @@ def _font(size=48):
     return ImageFont.load_default(size)
 
 
-def text_page(path: Path, rotate_ccw: int = 0, size=(1700, 2200), mode="RGB", exif_orientation=None):
+_VARIANT_WORDS = ["alpha", "harbour", "window", "garden", "lantern", "meadow", "copper", "silver",
+                  "orchard", "pillow", "thunder", "violet", "maple", "anchor", "barley", "candle"]
+
+
+def text_page(path: Path, rotate_ccw: int = 0, size=(1700, 2200), mode="RGB", exif_orientation=None,
+              variant=None):
+    """A clean text page. Pages written to different file names get different words by default,
+    so they are distinct pages rather than duplicates of one another."""
     im = Image.new(mode, size, "white")
     d = ImageDraw.Draw(im)
+    v = variant if variant is not None else sum(map(ord, Path(path).name))
+    extra = " ".join(_VARIANT_WORDS[(v + k * 5) % len(_VARIANT_WORDS)] for k in range(3))
     for i in range(12):
-        d.text((120, 150 + i * 80), f"Line {i} the quick brown fox jumps", fill="black", font=_font())
+        d.text((120, 150 + i * 80), f"Line {i} the quick brown fox {extra if i % 2 else 'jumps'}",
+               fill="black", font=_font())
     if rotate_ccw:
         im = im.rotate(rotate_ccw, expand=True)
     kw = {}

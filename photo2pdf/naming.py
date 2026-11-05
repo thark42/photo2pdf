@@ -145,13 +145,14 @@ class DocFields:
 
     def to_json(self) -> dict:
         return {"date": self.date.isoformat() if self.date else None, "sender": self.sender,
-                "doc_type": self.doc_type, "year": self.year, "kind": self.kind}
+                "doc_type": self.doc_type, "year": self.year, "kind": self.kind,
+                "extra": {k: v for k, v in self.extra.items() if k in ("total", "model")}}
 
     @classmethod
     def from_json(cls, d: dict) -> "DocFields":
         return cls(date=date.fromisoformat(d["date"]) if d.get("date") else None,
                    sender=d.get("sender"), doc_type=d.get("doc_type"), year=d.get("year"),
-                   kind=d.get("kind"))
+                   kind=d.get("kind"), extra=dict(d.get("extra") or {}))
 
     def empty(self) -> bool:
         return not (self.date or self.sender or self.doc_type)
@@ -245,6 +246,8 @@ def merge(fields: list[DocFields]) -> DocFields:
         out.doc_type = out.doc_type or f.doc_type
         out.year = out.year or f.year
         out.kind = out.kind or f.kind
+        for k, v in f.extra.items():
+            out.extra.setdefault(k, v)
     return out
 
 
@@ -252,6 +255,8 @@ def suggest_name(f: DocFields, fallback: str) -> str:
     """File name (with .pdf) from fields, or `fallback` when nothing useful was found."""
     if f.kind == "card":
         return suggest_card_name(f, fallback)
+    if f.kind in ("receipt", "confirmation", "ticket", "label"):
+        return suggest_kind_name(f, fallback)
     # Only name from content when it's clear: at least two of date / sender / type.
     if sum(x is not None for x in (f.date, f.sender, f.doc_type)) < 2:
         return fallback
@@ -464,4 +469,200 @@ def suggest_card_name(f: DocFields, fallback: str) -> str:
         parts.append(f.sender)
     if f.date:
         parts.append(f"valid until {f.date.isoformat()}")
+    return sanitize(" - ".join(parts)) + ".pdf"
+
+
+# ==========================================================================
+# Receipts, confirmations (screenshots), tickets, product labels, notes
+# ==========================================================================
+
+_AMOUNT = r"(?:€|EUR)?\s*(\d{1,5}[.,]\d{2})(?!\d)"
+_TOTAL_LINE = re.compile(r"(?im)^.*\b(totaal|total|te betalen|subtotaal|bedrag|pin|betaald|amount|paid)\b.*$")
+_RECEIPT_WORDS = re.compile(
+    r"\b(totaal|total|subtotaal|btw|vat|kassa|kassabon|bon ?nr|pinnen|pin|contant|wisselgeld|"
+    r"betaald|transactie|terminal|artikel|aantal|receipt|bonnummer|retour)\b", re.I)
+_DMY2 = re.compile(r"\b(\d{1,2})[-/.](\d{1,2})[-/.](\d{2})\b(?![-/.]\d)")
+
+SHOPS = CARD_ISSUERS + [
+    Rule(r"media ?markt", "MediaMarkt"), Rule(r"coolblue", "Coolblue"), Rule(r"\baction\b", "Action"),
+    Rule(r"blokker", "Blokker"), Rule(r"\bbol\.com\b|\bbol\b", "bol"), Rule(r"zeeman", "Zeeman"),
+    Rule(r"primark", "Primark"), Rule(r"decathlon", "Decathlon"), Rule(r"(?-i:\bC&A\b)", "C&A"),
+    Rule(r"karwei", "Karwei"), Rule(r"hornbach", "Hornbach"), Rule(r"\baldi\b", "Aldi"),
+    Rule(r"intertoys", "Intertoys"), Rule(r"bijenkorf", "de Bijenkorf"), Rule(r"\bshell\b", "Shell"),
+    Rule(r"\besso\b", "Esso"), Rule(r"(?-i:\bBP\b)", "BP"), Rule(r"\btotal ?energies\b", "TotalEnergies"),
+    Rule(r"booking\.com", "Booking.com"), Rule(r"airbnb", "Airbnb"), Rule(r"thuisbezorgd", "Thuisbezorgd"),
+    Rule(r"tikkie", "Tikkie"), Rule(r"paypal", "PayPal"), Rule(r"\bklarna\b", "Klarna"),
+]
+
+TRANSPORT_AND_TICKETS = [
+    Rule(r"(?-i:\bKLM\b)", "KLM"), Rule(r"transavia", "Transavia"), Rule(r"ryanair", "Ryanair"),
+    Rule(r"easy ?jet", "easyJet"), Rule(r"lufthansa", "Lufthansa"), Rule(r"eurostar", "Eurostar"),
+    Rule(r"(?-i:\bNS\b)|nederlandse spoorwegen", "NS"), Rule(r"ticketmaster", "Ticketmaster"),
+    Rule(r"eventim", "Eventim"), Rule(r"paylogic", "Paylogic"), Rule(r"postnl", "PostNL"),
+    Rule(r"(?-i:\bDHL\b)", "DHL"), Rule(r"(?-i:\bDPD\b)", "DPD"), Rule(r"(?-i:\bUPS\b)", "UPS"),
+    Rule(r"(?-i:\bGLS\b)", "GLS"), Rule(r"flixbus", "FlixBus"),
+]
+
+BRANDS = [Rule(rf"\b{b}\b", b) for b in (
+    "Bosch", "Siemens", "Samsung", "Philips", "Miele", "AEG", "Whirlpool", "LG", "Sony", "Dyson",
+    "Indesit", "Beko", "Liebherr", "Apple", "Panasonic", "Electrolux", "Inventum", "ATAG", "Etna",
+    "Remeha", "Nefit", "Vaillant", "Intergas")]
+
+_LABEL_PATTERNS = [
+    re.compile(r"\b(model|type|typ|mod\.|art\.?\s*nr|e-?nr|product ?no)\b", re.I),
+    re.compile(r"\b(s/?n|serial|serie(?:nummer|nr)?|ser\.? ?no)\b", re.I),
+    re.compile(r"\b\d{2,3}\s*-?\s*\d{0,3}\s*V\b|\b\d{2}\s*Hz\b|\b\d{2,5}\s*W\b|\bIP\d{2}\b"),
+    re.compile(r"(?-i:\bCE\b)|made in|manufactured", re.I),
+]
+_MODEL = re.compile(r"\b(?:model|type|typ|mod\.)\s*(?:no\.?|nr\.?)?\s*[:#]?\s*([A-Z0-9][A-Z0-9\-/.]{3,20})", re.I)
+
+_ENVELOPE = re.compile(r"port betaald|retouradres|antwoordnummer|postzegel|priority|frankering|"
+                       r"\bpostbus\s+\d+|\bp\.?o\.? box\b|aangetekend", re.I)
+_POSTCODE = re.compile(r"\b\d{4}\s?[A-Z]{2}\b")
+
+_PAYMENT = re.compile(r"betaling|overgemaakt|overboeking|betaald|\bpaid\b|payment|transfer|\bideal\b|"
+                      r"tikkie|ontvangen|afgeschreven|geld (?:verstuurd|ontvangen)", re.I)
+_BOOKING = re.compile(r"boeking|reservering|booking|reservation|bevestiging|confirmation|bestelling|"
+                      r"order(?:nummer| number| confirmed)?|bedankt voor je bestelling", re.I)
+_TICKET_WORDS = re.compile(r"boarding|instapkaart|\bgate\b|\bflight\b|\bvlucht\b|\bseat\b|\bstoel\b|"
+                           r"e-?ticket|ticket|toegangsbewijs|entree|concert|festival|treinkaartje|"
+                           r"zending|pakket|parcel|tracking|track ?& ?trace|verzendlabel|shipment", re.I)
+
+
+def _first_rule(rules, text):
+    for scope in (text[: max(400, len(text) // 3)], text):
+        for r in rules:
+            if (v := r.match(scope)):
+                return v
+    return None
+
+
+def _amount(s: str) -> Optional[str]:
+    m = re.findall(_AMOUNT, s)
+    if not m:
+        return None
+    return m[-1].replace(",", ".")
+
+
+def receipt_score(text: str) -> int:
+    """How receipt-like the text is: receipt words plus price-looking amounts."""
+    return len(set(w.lower() for w in _RECEIPT_WORDS.findall(text))) + min(3, len(re.findall(_AMOUNT, text)) // 3)
+
+
+def extract_receipt(text: str, today: Optional[date] = None) -> DocFields:
+    today = today or date.today()
+    text = re.sub(r"[ \t]+", " ", text or "")
+    f = DocFields(kind="receipt", doc_type="Receipt")
+    f.sender = _first_rule(SHOPS, text)
+    if not f.sender:
+        # Receipts start with the shop name; accept a clean first line of letters.
+        for ln in text.splitlines()[:3]:
+            ln = ln.strip()
+            letters = sum(ch.isalpha() for ch in ln)
+            if 3 <= len(ln) <= 30 and letters / max(len(ln), 1) > 0.7:
+                f.sender = sanitize(ln.title())
+                break
+    f.date = pick_date(text, today)
+    if not f.date:
+        for m in _DMY2.finditer(text):
+            try:
+                dt = date(2000 + int(m.group(3)), int(m.group(2)), int(m.group(1)))
+            except ValueError:
+                continue
+            if dt <= today:
+                f.date = dt
+                break
+    totals = [_amount(m.group(0)) for m in _TOTAL_LINE.finditer(text)]
+    totals = [t for t in totals if t]
+    if totals:
+        f.extra["total"] = max(totals, key=lambda t: float(t))
+    return f
+
+
+def extract_confirmation(text: str, today: Optional[date] = None) -> Optional[DocFields]:
+    """Payment / booking confirmations in screenshots. None when the screenshot is neither."""
+    text = re.sub(r"[ \t]+", " ", text or "")
+    pay, book = len(_PAYMENT.findall(text)), len(_BOOKING.findall(text))
+    if not pay and not book:
+        return None
+    f = DocFields(kind="confirmation",
+                  doc_type="Payment confirmation" if pay >= book else "Booking confirmation")
+    f.sender = _first_rule(SHOPS + TRANSPORT_AND_TICKETS, text)
+    f.date = pick_date(text, today)
+    amt = _amount(text)
+    if amt and f.doc_type == "Payment confirmation":
+        f.extra["total"] = amt
+    return f
+
+
+def is_ticket_text(text: str) -> bool:
+    return bool(_TICKET_WORDS.search(text or ""))
+
+
+def extract_ticket(text: str, today: Optional[date] = None) -> DocFields:
+    text = re.sub(r"[ \t]+", " ", text or "")
+    low = text.lower()
+    if re.search(r"boarding|instapkaart|\bgate\b|\bflight\b|\bvlucht\b", low):
+        t = "Boarding pass"
+    elif re.search(r"zending|pakket|parcel|tracking|track ?& ?trace|verzendlabel|shipment", low):
+        t = "Parcel label"
+    elif re.search(r"treinkaartje|\btrein\b|\btrain\b|eurostar", low):
+        t = "Train ticket"
+    else:
+        t = "Ticket"
+    f = DocFields(kind="ticket", doc_type=t)
+    f.sender = _first_rule(TRANSPORT_AND_TICKETS, text)
+    # Event/travel dates are often in the future: allow up to two years ahead.
+    f.date = pick_date(text, date((today or date.today()).year + 2, 12, 31))
+    return f
+
+
+def label_score(text: str) -> int:
+    return sum(1 for rx in _LABEL_PATTERNS if rx.search(text or ""))
+
+
+def extract_label(text: str) -> DocFields:
+    f = DocFields(kind="label", doc_type="Product label")
+    f.sender = _first_rule(BRANDS, text or "")
+    m = _MODEL.search(text or "")
+    if m:
+        f.extra["model"] = m.group(1).strip(".-/").replace("/", "-")
+    return f
+
+
+def is_envelope_text(text: str, words: int) -> bool:
+    """Few words, postal markings or a postcode + address block, nothing like a letter body."""
+    return words < 30 and (bool(_ENVELOPE.search(text or "")) or
+                           (len(_POSTCODE.findall(text or "")) >= 1 and words < 15))
+
+
+def business_card_fields(text: str) -> Optional[DocFields]:
+    """Contact details and no card type: a business card. Named by e-mail/web domain, not the person."""
+    email = re.search(r"[\w.+-]+@([\w-]+(?:\.[\w-]+)+)", text or "")
+    web = re.search(r"\b(?:www\.)?([a-z0-9-]+\.(?:nl|com|eu|be|de|org|net|io))\b", text or "", re.I)
+    phone = re.search(r"(?:\+31|\b0)\s?[1-9](?:[\s-]?\d){7,8}\b", text or "")
+    if not (email or web) and not phone:
+        return None
+    f = DocFields(kind="card", doc_type="Business card")
+    dom = (email.group(1) if email else (web.group(1) if web else None))
+    if dom and not re.match(r"(gmail|hotmail|outlook|live|yahoo|icloud|ziggo|kpnmail|xs4all|planet)\.", dom, re.I):
+        f.sender = dom.lower()
+    return f
+
+
+def suggest_kind_name(f: DocFields, fallback: str) -> str:
+    """Names for receipts, confirmations, tickets, labels. Letters and cards use suggest_name."""
+    if not f.doc_type:
+        return fallback
+    parts = [f.doc_type]
+    if f.sender:
+        parts.append(f.sender)
+    if f.kind == "label" and f.extra.get("model"):
+        parts.append(f.extra["model"])
+    if f.date:
+        parts.append(f.date.isoformat())
+    if f.extra.get("total"):
+        parts.append(f"EUR {f.extra['total']}")
+    if len(parts) == 1 and f.kind not in ("label",):
+        return fallback.replace("Document", f.doc_type, 1)
     return sanitize(" - ".join(parts)) + ".pdf"

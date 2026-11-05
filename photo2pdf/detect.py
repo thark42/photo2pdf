@@ -44,13 +44,11 @@ from photo2pdf.core import (
     IMAGE_EXTS, Options, Tesseract, _open_image, _resize_long, count_words, find_rotation,
     flatten_lighting, load_page, natural_key, rotate_cw,
 )
-from photo2pdf.naming import (
-    DocFields, extract_any, looks_like_card_text, merge, sanitize, suggest_name, text_from_tsv,
-)
+from photo2pdf.naming import DocFields, merge, sanitize, suggest_name, text_from_tsv
 
 DETECT_LONG_EDGE = 1600
 THUMB_SIZE = 160
-CACHE_VERSION = 3
+CACHE_VERSION = 4
 CARD_BACK_SECONDS = 120   # a low-text card photo this soon after a card is taken as its back
 
 
@@ -64,7 +62,13 @@ class PhotoInfo:
     fields: Optional[DocFields] = None    # date / sender / type from OCR text
     saved_as: Optional[Path] = None       # PDF this photo already went into (registry)
     card_shape: bool = False              # straightened outline has ID-1 card proportions
-    kind: str = "page"                    # "page" (letters, forms) or "card" (ID, bank, insurance, loyalty)
+    kind: str = "page"                    # see classify.py: page, card, receipt, confirmation, ticket, note, label
+    reason: Optional[str] = None          # why it is not a document (envelope, screenshot, duplicate, ...)
+    hard_to_read: bool = False            # blurred or low OCR confidence: suggest a retake
+    screenshot: bool = False
+    sharpness: float = 0.0
+    dhash: Optional[int] = None           # image fingerprint (upright page)
+    minhash: list = field(default_factory=list)  # text fingerprint (not reversible to the text)
     error: Optional[str] = None
     thumb: Optional[object] = field(default=None, repr=False, compare=False)  # PIL.Image
     thumb_jpeg: Optional[bytes] = field(default=None, repr=False, compare=False)
@@ -129,64 +133,38 @@ def _exif_time(im) -> Optional[datetime]:
 
 def _analyse(path: Path, tess: Tesseract, settings: ScanSettings, opts: Options,
              cached: Optional[dict] = None) -> PhotoInfo:
-    """Straighten, OCR, decide document-ness; for documents also orientation + name fields."""
+    """Measure, OCR and classify one photo (see classify.py); documents also get orientation,
+    name fields and fingerprints for duplicate detection."""
+    from dataclasses import replace
+
+    from photo2pdf import classify as cls
     from photo2pdf import diag
+    from photo2pdf import features as ft
 
     taken = None
     t0 = time.perf_counter()
     try:
         with _open_image(path) as raw:
             taken = _exif_time(raw)
+            screenshot = ft.is_screenshot(path, raw, raw.size)
         if taken is None:
             taken = _fallback_time(path)
-        im = load_page(path, opts, max_edge=2000)
+        # Screenshots are already flat and upright: never warp or turn them.
+        im = load_page(path, replace(opts, straighten=opts.straighten and not screenshot), max_edge=2000)
         if cached is not None:
             info = PhotoInfo(path=path, taken=taken, words=cached["words"],
                              rotation=cached.get("rotation", 0),
                              fields=DocFields.from_json(cached["fields"]) if cached.get("fields") else None,
-                             card_shape=cached.get("card_shape", False), kind=cached.get("kind", "page"))
+                             card_shape=cached.get("card_shape", False), kind=cached.get("kind", "page"),
+                             is_document=cached.get("is_document", False), reason=cached.get("reason"),
+                             hard_to_read=cached.get("hard", False), dhash=cached.get("dhash"),
+                             minhash=cached.get("minhash") or [], sharpness=cached.get("sharpness", 0.0),
+                             screenshot=cached.get("screenshot", False))
         else:
-            gray = flatten_lighting(_resize_long(im.convert("L"), DETECT_LONG_EDGE))
-            with tempfile.TemporaryDirectory(prefix="photo2pdf-d-") as td:
-                work = Path(td)
-                img = work / "d.png"
-                gray.save(img)
-                r = tess._run([img.name, "stdout", "-l", opts.language, "--psm", "1", "tsv"],
-                              cwd=work, timeout=180, threads=1)
-                tsv = r.stdout or ""
-                words = count_words(tsv)
-                text = text_from_tsv(tsv)
-                card_shape = bool(im.info.get("photo2pdf_card"))
-                pre_rotation = None
-                if card_shape and words < settings.min_words:
-                    # Cards are small and often photographed upside down or sideways; page
-                    # segmentation then reads almost nothing. Turn it upright and read again.
-                    pre_rotation = find_rotation(im, tess, opts.language, work, threads=1,
-                                                 prefer_landscape=True)
-                    if pre_rotation:
-                        rotate_cw(gray, pre_rotation).save(img)
-                        r = tess._run([img.name, "stdout", "-l", opts.language, "--psm", "1", "tsv"],
-                                      cwd=work, timeout=180, threads=1)
-                        tsv = r.stdout or ""
-                        words, text = count_words(tsv), text_from_tsv(tsv)
-                info = PhotoInfo(path=path, taken=taken, words=words, card_shape=card_shape)
-                # Cards carry little text: card proportions, or a card keyword / passport strip,
-                # with a couple of readable words is enough.
-                # Without the outline, ask for more: a card keyword or passport strip and little text
-                # (a short insurer letter mentioning "zorgverzekering" must stay a letter).
-                is_card = words >= 2 and (card_shape or (words < 40 and looks_like_card_text(text)))
-                if is_card:
-                    info.kind = "card"
-                if words >= settings.min_words or is_card:
-                    info.rotation = pre_rotation if pre_rotation is not None else find_rotation(
-                        im, tess, opts.language, work, threads=1, prefer_landscape=is_card)
-                    info.fields = extract_any(text, card_shape=is_card)
-                elif pre_rotation is not None:
-                    info.rotation = pre_rotation   # kept in case it becomes a card's back
-        info.is_document = info.words >= settings.min_words or info.kind == "card"
-        logging.info("scan %s: words=%d document=%s kind=%s card_shape=%s rotation=%d cached=%s taken=%s (%.2fs)",
-                     path.name, info.words, info.is_document, info.kind, info.card_shape, info.rotation,
-                     cached is not None,
+            info = _measure(path, im, taken, tess, settings, opts, screenshot, ft, cls)
+        logging.info("scan %s: words=%d document=%s kind=%s reason=%s card_shape=%s hard=%s rotation=%d "
+                     "cached=%s taken=%s (%.2fs)", path.name, info.words, info.is_document, info.kind,
+                     info.reason, info.card_shape, info.hard_to_read, info.rotation, cached is not None,
                      info.taken.isoformat(timespec="minutes"), time.perf_counter() - t0)
         if info.fields:
             diag.fields("scan %s fields %s", path.name, info.fields.to_json())
@@ -206,6 +184,58 @@ def _analyse(path: Path, tess: Tesseract, settings: ScanSettings, opts: Options,
     except Exception as exc:  # noqa: BLE001
         logging.exception("scan failed for %s", path.name)
         return PhotoInfo(path=path, taken=taken or _fallback_time(path), error=str(exc))
+
+
+def _measure(path, im, taken, tess, settings, opts, screenshot, ft, cls) -> PhotoInfo:
+    gray = flatten_lighting(_resize_long(im.convert("L"), DETECT_LONG_EDGE))
+    card_shape = bool(im.info.get("photo2pdf_card"))
+    quad = bool(im.info.get("photo2pdf_quad"))
+    with tempfile.TemporaryDirectory(prefix="photo2pdf-d-") as td:
+        work = Path(td)
+        img = work / "d.png"
+
+        def ocr(g):
+            g.save(img)
+            r = tess._run([img.name, "stdout", "-l", opts.language, "--psm", "1", "tsv"],
+                          cwd=work, timeout=180, threads=1)
+            return r.stdout or ""
+
+        tsv = ocr(gray)
+        words, text = count_words(tsv), text_from_tsv(tsv)
+        pre_rotation = None
+        if card_shape and words < settings.min_words:
+            # Cards are small and often photographed upside down or sideways; page
+            # segmentation then reads almost nothing. Turn it upright and read again.
+            pre_rotation = find_rotation(im, tess, opts.language, work, threads=1, prefer_landscape=True)
+            if pre_rotation:
+                tsv = ocr(rotate_cw(gray, pre_rotation))
+                words, text = count_words(tsv), text_from_tsv(tsv)
+        feat = {"words": words, "quad": quad, "card_shape": card_shape, "screenshot": screenshot,
+                "aspect": ft.page_aspect(im), "ink": ft.ink_density(gray), "sharpness": ft.sharpness(im)}
+        feat.update(ft.ocr_stats(tsv))
+        feat.update(ft.find_codes(im))
+        decision = cls.classify(feat, text, settings.min_words)
+        info = PhotoInfo(path=path, taken=taken, words=words, card_shape=card_shape,
+                         kind=decision.kind or "page", is_document=decision.is_document,
+                         reason=decision.reason, fields=decision.fields, screenshot=screenshot,
+                         sharpness=feat["sharpness"])
+        if decision.is_document:
+            if pre_rotation is not None:
+                info.rotation = pre_rotation
+            elif not screenshot:
+                info.rotation = find_rotation(im, tess, opts.language, work, threads=1,
+                                              prefer_landscape=decision.kind == "card")
+            info.hard_to_read = cls.hard_to_read(feat)
+        elif pre_rotation is not None:
+            info.rotation = pre_rotation   # kept in case it becomes a card's back
+        upright = rotate_cw(gray, info.rotation)
+        info.dhash = ft.dhash(upright)
+        # Text fingerprint only from a real reading; garbled low-confidence tokens from a blur
+        # would make a blurred copy look like a different document.
+        info.minhash = ft.minhash(text) if words >= 4 else []
+        logging.info("features %s: %s", path.name,
+                     {k: (round(v, 3) if isinstance(v, float) else v) for k, v in feat.items()})
+    return info
 
 
 def _fallback_time(path: Path) -> datetime:
@@ -333,7 +363,10 @@ def scan_paths(
             if use_cache and key and info.error is None:
                 cache[key] = {"words": info.words, "rotation": info.rotation,
                               "fields": info.fields.to_json() if info.fields else None,
-                              "card_shape": info.card_shape, "kind": info.kind}
+                              "card_shape": info.card_shape, "kind": info.kind,
+                              "is_document": info.is_document, "reason": info.reason,
+                              "hard": info.hard_to_read, "dhash": info.dhash, "minhash": info.minhash,
+                              "sharpness": info.sharpness, "screenshot": info.screenshot}
         return info
 
     progress(0, total, f"Found {total} photos")
@@ -346,9 +379,10 @@ def scan_paths(
                 results.append(info)
     if use_cache:
         _save_cache(cache)
-    # Re-apply threshold (cache stores raw word counts so changing min_words needs no rescan).
+    # A photo that could not be read is never a document.
     for r in results:
-        r.is_document = r.error is None and (r.words >= settings.min_words or r.kind == "card")
+        if r.error is not None:
+            r.is_document = False
     results.sort(key=lambda r: (r.taken, natural_key(r.path)))
     from photo2pdf import registry
 
@@ -377,6 +411,8 @@ def _new_letterhead(current: list[PhotoInfo], ph: PhotoInfo) -> bool:
         return False
     if ph.kind != current[-1].kind:
         return True                      # a card next to a letter is never the same document
+    if ph.kind in ("confirmation", "ticket", "label"):
+        return True                      # one screenshot / ticket / type plate per document
     if ph.kind == "card" and len(current) >= 2:
         return True                      # a card has a front and a back, nothing more
     if not ph.fields:
@@ -413,6 +449,46 @@ def group_documents(photos: list[PhotoInfo], gap_seconds: int) -> list[list[Phot
     return groups
 
 
+DUP_IMAGE_BITS = 40     # of 256 dHash bits; straightened re-shots of one page differ by far less
+DUP_TEXT_SIMILARITY = 0.6
+
+
+def mark_duplicates(photos: list[PhotoInfo]) -> None:
+    """The same page or card photographed more than once: keep the clearest, set the rest aside.
+
+    Two document photos are duplicates when their upright images are near-identical
+    (dHash) AND, where both carry text, their word sets mostly agree (MinHash). The
+    text check stops two pages of the same form layout counting as one. The copy with
+    more readable words, then the sharper one, is kept. Nothing is deleted: the others
+    appear under "Not documents" as "Duplicate of …" and can be added back.
+    """
+    from photo2pdf.features import hamming, minhash_similarity
+
+    docs = [p for p in photos if p.is_document and p.dhash is not None]
+    docs.sort(key=lambda p: (-p.words, -p.sharpness))      # best copies first
+    kept: list[PhotoInfo] = []
+    for p in docs:
+        dup_of = None
+        for k in kept:
+            if k.kind != p.kind or k.path.parent != p.path.parent:
+                continue
+            if hamming(k.dhash, p.dhash) > DUP_IMAGE_BITS:
+                continue
+            if k.minhash and p.minhash and minhash_similarity(k.minhash, p.minhash) < DUP_TEXT_SIMILARITY:
+                continue
+            if (bool(k.minhash) != bool(p.minhash) and (k.words >= 4 or p.words >= 4)
+                    and not (k.hard_to_read or p.hard_to_read)):
+                continue   # text on one, none on the other: different things, unless one is a blur
+            dup_of = k
+            break
+        if dup_of is None:
+            kept.append(p)
+        else:
+            p.is_document = False
+            p.reason = f"Duplicate of {dup_of.path.name} (the clearer copy is kept)"
+            logging.info("duplicate %s of %s", p.path.name, dup_of.path.name)
+
+
 ORGANIZE_CHOICES = {
     "none": "All in one folder",
     "year": "One folder per year",
@@ -446,6 +522,7 @@ class Plan:
                 ph.is_document, ph.kind = True, "card"
                 is_front = False
             prev, prev_is_front = ph, is_front
+        mark_duplicates(photos)
         groups = group_documents(photos, gap_seconds)
         others = [p for p in photos if not p.is_document]
         # Near-misses first so the user sees likely mistakes at the top.
@@ -549,6 +626,9 @@ class Plan:
     def add(self, other_index: int) -> None:
         """Turn a non-document photo into its own document, placed in time order."""
         ph = self.others.pop(other_index)
+        ph.reason = None
+        if ph.kind not in ("page", "card", "receipt", "confirmation", "ticket", "note", "label"):
+            ph.kind = "page"
         idx = 0
         while idx < len(self.groups) and self.groups[idx][0].taken <= ph.taken:
             idx += 1
@@ -562,15 +642,29 @@ class Plan:
     def is_card(self, g: int) -> bool:
         return any(p.kind == "card" for p in self.groups[g])
 
+    def kind(self, g: int) -> str:
+        return self.groups[g][0].kind
+
+    def hard_to_read(self, g: int) -> bool:
+        return any(p.hard_to_read for p in self.groups[g])
+
     def suggested_name(self, g: int) -> str:
         grp = self.groups[g]
         width = max(2, len(str(len(self.groups))))
         t = grp[0].taken
         f = self.fields(g)
+        kind = self.kind(g)
         if self.is_card(g):
             f.kind = "card"
             sides = "front and back" if len(grp) == 2 else f"{len(grp)} side" + ("s" if len(grp) != 1 else "")
             fallback = f"Card {g + 1:0{width}d} - {t:%Y-%m-%d %H.%M} ({sides}).pdf"
+        elif kind in ("receipt", "confirmation", "ticket", "note", "label"):
+            f.kind = kind
+            word = {"receipt": "Receipt", "confirmation": "Screenshot", "ticket": "Ticket",
+                    "note": "Note", "label": "Product label"}[kind]
+            fallback = f"{word} - {t:%Y-%m-%d %H.%M}.pdf"
+            if kind == "note":
+                return fallback
         else:
             pages = f"{len(grp)} page" + ("s" if len(grp) != 1 else "")
             fallback = f"Document {g + 1:0{width}d} - {t:%Y-%m-%d %H.%M} ({pages}).pdf"
@@ -578,8 +672,17 @@ class Plan:
 
     def folder_for(self, g: int, organize: str) -> str:
         """Subfolder (possibly empty) a document goes into for the chosen organize mode."""
-        if self.is_card(g):
-            return "" if organize == "none" else "Cards"
+        from photo2pdf.classify import FOLDERS, YEARLESS
+
+        kind = "card" if self.is_card(g) else self.kind(g)
+        if kind in FOLDERS:
+            if organize == "none":
+                return ""
+            if kind in YEARLESS:
+                return FOLDERS[kind]
+            f = self.fields(g)
+            year = f.date.year if f.date else self.groups[g][0].taken.year
+            return f"{FOLDERS[kind]}/{year}"
         f = self.fields(g)
         year = str(f.date.year) if f.date else (str(f.year) if f.year else "Undated")
         sender = sanitize(f.sender) if f.sender else "Other"
