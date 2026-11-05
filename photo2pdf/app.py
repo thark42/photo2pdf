@@ -47,7 +47,7 @@ def load_options() -> Options:
     opts = Options()
     try:
         saved = json.loads((_data_dir() / "settings.json").read_text("utf-8"))
-        for k in ("combine", "ocr", "grayscale", "auto_rotate", "language"):
+        for k in ("combine", "ocr", "grayscale", "auto_rotate", "straighten", "language", "auto_name"):
             if k in saved:
                 setattr(opts, k, saved[k])
     except (OSError, ValueError):
@@ -68,10 +68,10 @@ def load_scan_settings() -> ScanSettings:
     return s
 
 
-def save_options(opts: Options) -> None:
+def save_options(opts: Options, scan: ScanSettings | None = None) -> None:
     try:
         data = asdict(opts)
-        data["scan"] = {k: v for k, v in asdict(load_scan_settings()).items() if k != "workers"}
+        data["scan"] = {k: v for k, v in asdict(scan or load_scan_settings()).items() if k != "workers"}
         (_data_dir() / "settings.json").write_text(json.dumps(data, indent=2), "utf-8")
     except OSError:
         logging.exception("could not save settings")
@@ -136,7 +136,7 @@ class App:
             self.root = tk.Tk()
 
         self.root.title(APP_NAME)
-        self.root.minsize(480, 500)
+        self.root.minsize(520, 600)
         self.opts = load_options()
         self.events: queue.Queue = queue.Queue()
         self.busy = False
@@ -170,14 +170,20 @@ class App:
         self.v_combine = tk.BooleanVar(value=self.opts.combine)
         self.v_ocr = tk.BooleanVar(value=self.opts.ocr)
         self.v_gray = tk.BooleanVar(value=self.opts.grayscale)
+        self.v_straight = tk.BooleanVar(value=self.opts.straighten)
+        self.v_recursive = tk.BooleanVar(value=load_scan_settings().recursive)
         ttk.Radiobutton(box, text="Put all photos into one PDF", variable=self.v_combine,
                         value=True).pack(anchor="w", padx=10, pady=2)
         ttk.Radiobutton(box, text="Make a separate PDF for each photo", variable=self.v_combine,
                         value=False).pack(anchor="w", padx=10, pady=2)
         ttk.Checkbutton(box, text="Make text searchable (slower)",
                         variable=self.v_ocr).pack(anchor="w", padx=10, pady=(8, 2))
-        ttk.Checkbutton(box, text="Black and white (smaller files)",
-                        variable=self.v_gray).pack(anchor="w", padx=10, pady=(2, 8))
+        ttk.Checkbutton(box, text="Black and white, cleaned up like a scan (smaller files)",
+                        variable=self.v_gray).pack(anchor="w", padx=10, pady=2)
+        ttk.Checkbutton(box, text="Straighten pages photographed at an angle",
+                        variable=self.v_straight).pack(anchor="w", padx=10, pady=2)
+        ttk.Checkbutton(box, text="When finding documents in a folder, include its subfolders",
+                        variable=self.v_recursive).pack(anchor="w", padx=10, pady=(2, 8))
 
         # Progress + result
         self.progress = ttk.Progressbar(self.root, mode="determinate")
@@ -219,9 +225,11 @@ class App:
         from photo2pdf.review import ScanWindow
 
         opts = self._current_options()
-        save_options(opts)
-        logging.info("folder scan: %s", folder)
-        ScanWindow(self, folder, opts, load_scan_settings())
+        scan = load_scan_settings()
+        scan.recursive = bool(self.v_recursive.get())
+        save_options(opts, scan)
+        logging.info("folder scan: %s recursive=%s", folder, scan.recursive)
+        ScanWindow(self, folder, opts, scan)
 
     def choose(self) -> None:
         if self.busy:
@@ -246,6 +254,7 @@ class App:
         self.opts.combine = bool(self.v_combine.get())
         self.opts.ocr = bool(self.v_ocr.get())
         self.opts.grayscale = bool(self.v_gray.get())
+        self.opts.straighten = bool(self.v_straight.get())
         return self.opts
 
     def start(self, files: list[str]) -> None:
@@ -338,7 +347,7 @@ def selftest(out_pdf: Path) -> int:
         return 1
     langs = tess.languages()
     print(f"languages: {sorted(langs)}")
-    if not {"eng", "osd"} <= langs:
+    if not {"eng", "nld", "osd"} <= langs:
         return 1
 
     with tempfile.TemporaryDirectory() as td:
@@ -384,6 +393,46 @@ def selftest(out_pdf: Path) -> int:
         shape = [len(g) for g in plan.groups]
         print(f"folder scan: words={[i.words for i in infos]} groups={shape}")
         if shape != [2, 1]:
+            return 1
+
+    # Angled, upside-down Dutch letter: straightening, orientation, naming.
+    import numpy as np
+
+    import cv2
+
+    letter = Image.new("RGB", (1240, 1754), (250, 250, 246))
+    ld = ImageDraw.Draw(letter)
+    try:
+        f_big = ImageFont.truetype("arial.ttf" if os.name == "nt" else "DejaVuSans.ttf", 48)
+        f_txt = ImageFont.truetype("arial.ttf" if os.name == "nt" else "DejaVuSans.ttf", 30)
+    except OSError:
+        f_big = f_txt = ImageFont.load_default(36)
+    ld.text((90, 80), "Belastingdienst", fill="black", font=f_big)
+    y = 240
+    for line in ["Datum 14 maart 2025", "", "Voorlopige aanslag inkomstenbelasting 2025", "",
+                 "Geachte heer, mevrouw,", "Hierbij ontvangt u de voorlopige aanslag voor 2025.",
+                 "Het bedrag dat u moet betalen staat hieronder vermeld.",
+                 "U betaalt dit bedrag in maandelijkse termijnen.",
+                 "Met vriendelijke groet, de inspecteur"]:
+        ld.text((90, y), line, fill="black", font=f_txt)
+        y += 62
+    src = np.asarray(letter)
+    W, H = 2400, 1800
+    # Upside down (corners listed BR,BL,TL,TR of the page) and in perspective.
+    corners = np.float32([[1560, 1420], [880, 1500], [760, 260], [1640, 330]])
+    m = cv2.getPerspectiveTransform(np.float32([[0, 0], [1240, 0], [1240, 1754], [0, 1754]]), corners)
+    bg = np.full((H, W, 3), (70, 55, 40), np.uint8)
+    warped = cv2.warpPerspective(src, m, (W, H))
+    mask = cv2.warpPerspective(np.full((1754, 1240), 255, np.uint8), m, (W, H))
+    shot = np.where(mask[..., None] > 0, warped, bg).astype(np.uint8)
+    with tempfile.TemporaryDirectory() as td:
+        folder = Path(td)
+        Image.fromarray(shot).save(folder / "IMG_20250315_101500.jpg")
+        infos = scan_folder(folder, ScanSettings(workers=1), tess, use_cache=False)
+        plan = Plan.from_scan(infos, 180)
+        names = plan.output_names()
+        print(f"letter: doc={infos[0].is_document} rotation={infos[0].rotation} names={names}")
+        if names != ["2025-03-14 Belastingdienst - Voorlopige aanslag inkomstenbelasting 2025.pdf"]:
             return 1
     return 0
 

@@ -12,7 +12,7 @@ import threading
 import traceback
 from pathlib import Path
 
-from photo2pdf.core import Options, Tesseract, save_documents
+from photo2pdf.core import Options, PageSpec, Tesseract, save_documents
 from photo2pdf.detect import Plan, ScanSettings, scan_folder
 
 COLUMNS = 6
@@ -111,7 +111,7 @@ class ScanWindow:
             try:
                 infos = scan_folder(self.folder, self.scan, tess,
                                     progress=lambda d, t, m: self.events.put(("progress", d, t, m)),
-                                    cancel=self.cancel)
+                                    cancel=self.cancel, opts=self.opts)
                 self.events.put(("scanned", infos))
             except Exception as exc:  # noqa: BLE001
                 logging.error("scan crashed:\n%s", traceback.format_exc())
@@ -178,27 +178,40 @@ class ScanWindow:
             text=f"Found {n} document{'s' if n != 1 else ''} ({pages} page{'s' if pages != 1 else ''})"
             if n else "No documents found.")
         self.hint.configure(
-            text="Photos taken close together are put into one document. "
-                 "Click a page to move it, split the document there, or remove it. "
-                 "Click a photo under \"Other photos\" if it's actually a document.")
+            text="Photos taken close together are put into one document. Pages have been "
+                 "straightened and turned upright; click a page to rotate, move, split or remove it. "
+                 "The file name is suggested from the letter itself (date, sender, type) — "
+                 "click it to change it. Click a photo under \"Other photos\" if it's actually a document.")
         self.b_save.configure(state="normal" if n else "disabled",
                               text=f"Save {n} PDF{'s' if n != 1 else ''}")
 
         names = plan.output_names()
+        self.name_vars = []
         for g, grp in enumerate(plan.groups):
-            box = tk.LabelFrame(self.inner, text=f"  {names[g][:-4]}  ", bg="#ffffff",
+            box = tk.LabelFrame(self.inner, text=f"  Document {g + 1} · {len(grp)} page"
+                                f"{'s' if len(grp) != 1 else ''}  ", bg="#ffffff",
                                 font=("Segoe UI", 10, "bold"), padx=8, pady=6)
             box.pack(fill="x", padx=4, pady=6)
-            bar = tk.Frame(box, bg="#ffffff")
-            bar.grid(row=0, column=0, columnspan=COLUMNS, sticky="w", pady=(0, 4))
+            namerow = tk.Frame(box, bg="#ffffff")
+            namerow.pack(fill="x", pady=(0, 4))
+            # Buttons first so they keep their space; the name field takes the rest.
+            ttk.Button(namerow, text="Not a document",
+                       command=lambda g=g: self._edit(plan.remove_group, g)).pack(side="right", padx=(6, 0))
             if g > 0:
-                ttk.Button(bar, text="Join with document above",
-                           command=lambda g=g: self._edit(plan.join_previous, g)).pack(side="left")
-            ttk.Button(bar, text="Not a document",
-                       command=lambda g=g: self._edit(plan.remove_group, g)).pack(side="left", padx=6)
+                ttk.Button(namerow, text="Join with document above",
+                           command=lambda g=g: self._edit(plan.join_previous, g)).pack(side="right", padx=(6, 0))
+            tk.Label(namerow, text="File name:", bg="#ffffff").pack(side="left")
+            var = tk.StringVar(value=names[g][:-4])
+            self.name_vars.append(var)
+            ent = ttk.Entry(namerow, textvariable=var, width=40)
+            ent.pack(side="left", fill="x", expand=True, padx=(6, 0))
+            ent.bind("<Return>", lambda e, g=g: self._rename(g))
+            ent.bind("<FocusOut>", lambda e, g=g: self._rename(g))
+            grid = tk.Frame(box, bg="#ffffff")
+            grid.pack(anchor="w")
             for i, info in enumerate(grp):
-                cell = tk.Frame(box, bg="#ffffff")
-                cell.grid(row=1 + i // COLUMNS, column=i % COLUMNS, padx=4, pady=4, sticky="n")
+                cell = tk.Frame(grid, bg="#ffffff")
+                cell.grid(row=i // COLUMNS, column=i % COLUMNS, padx=4, pady=4, sticky="n")
                 lbl = tk.Label(cell, image=self._thumb(info), text="?" if info.thumb is None else "",
                                bg="#ffffff", cursor="hand2", relief="solid", bd=1)
                 lbl.pack()
@@ -222,9 +235,23 @@ class ScanWindow:
                 tk.Label(box, text=f"…and {len(others) - MAX_OTHERS_SHOWN} more not shown.",
                          bg="#ffffff", fg="#777").grid(row=99, column=0, columnspan=COLUMNS, sticky="w")
 
+    def _rename(self, g):
+        if self.plan and g < len(self.plan.groups) and g < len(getattr(self, "name_vars", [])):
+            typed = self.name_vars[g].get().strip()
+            suggested = self.plan.suggested_name(g)[:-4]
+            if typed and typed != suggested:
+                self.plan.set_name(g, typed)
+            elif not typed:
+                self.plan.set_name(g, "")
+
+    def _commit_names(self):
+        for g in range(len(getattr(self, "name_vars", []))):
+            self._rename(g)
+
     def _edit(self, fn, *args):
         if self.busy:
             return
+        self._commit_names()
         fn(*args)
         self.redraw()
 
@@ -233,6 +260,10 @@ class ScanWindow:
 
         plan = self.plan
         m = self.tk.Menu(self.win, tearoff=0)
+        m.add_command(label="Rotate right ↻", command=lambda: self._edit(plan.rotate, g, i, 90))
+        m.add_command(label="Rotate left ↺", command=lambda: self._edit(plan.rotate, g, i, 270))
+        m.add_command(label="Turn upside down", command=lambda: self._edit(plan.rotate, g, i, 180))
+        m.add_separator()
         if i > 0:
             m.add_command(label="Move left", command=lambda: self._edit(plan.move, g, i, -1))
         if i < len(plan.groups[g]) - 1:
@@ -268,10 +299,11 @@ class ScanWindow:
     def save(self):
         if self.busy or not self.plan or not self.plan.groups:
             return
+        self._commit_names()
         self.busy = True
         self.b_save.configure(state="disabled")
         self.b_cancel.configure(text="Stop", command=self.cancel.set)
-        docs = [(name, [p.path for p in grp])
+        docs = [(name, [PageSpec(p.path, p.rotation) for p in grp])
                 for name, grp in zip(self.plan.output_names(), self.plan.groups)]
         opts, out_dir = self.opts, self.out_dir
 

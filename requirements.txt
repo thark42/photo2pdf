@@ -4,3 +4,5 @@ pillow-heif==1.8.1
 img2pdf==0.6.3
 pypdf==6.21.2
 tkinterdnd2==0.6.4
+numpy==2.5.3
+opencv-python-headless==4.14.0.94

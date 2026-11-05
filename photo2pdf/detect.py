@@ -17,8 +17,9 @@ Grouping:
     timestamp in the filename (IMG_20241105_143210, PXL_..., "WhatsApp Image
     2024-11-05 at 14.32.10"), then the file's modified time.
   * Document photos sorted by time are cut into separate documents wherever
-    the gap between neighbours exceeds `gap_seconds`, or a non-document photo
-    was taken in between.
+    the gap between neighbours exceeds `gap_seconds`, a non-document photo
+    was taken in between, the folder changes, or a page shows a different
+    sender or document date than the pages before it (a new letter).
 
 Results are cached per (path, size, mtime) so re-scanning a folder is fast.
 """
@@ -37,11 +38,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
-from photo2pdf.core import IMAGE_EXTS, Tesseract, _open_image, flatten_lighting, natural_key
+from photo2pdf.core import (
+    IMAGE_EXTS, Options, Tesseract, _open_image, _resize_long, count_words, find_rotation,
+    flatten_lighting, load_page, natural_key, rotate_cw,
+)
+from photo2pdf.naming import DocFields, extract, merge, sanitize, suggest_name, text_from_tsv
 
 DETECT_LONG_EDGE = 1600
 THUMB_SIZE = 160
-CACHE_VERSION = 1
+CACHE_VERSION = 2
 
 
 @dataclass
@@ -50,6 +55,8 @@ class PhotoInfo:
     taken: datetime
     words: int = 0
     is_document: bool = False
+    rotation: int = 0                     # clockwise turn after straightening
+    fields: Optional[DocFields] = None    # date / sender / type from OCR text
     error: Optional[str] = None
     thumb: Optional[object] = field(default=None, repr=False, compare=False)  # PIL.Image
 
@@ -100,60 +107,42 @@ def _exif_time(im) -> Optional[datetime]:
 # Detection
 # --------------------------------------------------------------------------
 
-_WORD_OK = re.compile(r"^[^\W_]{3,}$|^[^\W_][\w'’.,:/\-]{2,}$", re.UNICODE)
-
-
-def count_words(tsv: str, min_conf: float = 60.0) -> int:
-    n = 0
-    for line in tsv.splitlines()[1:]:
-        cols = line.split("\t")
-        if len(cols) < 12:
-            continue
-        try:
-            conf = float(cols[10])
-        except ValueError:
-            continue
-        text = cols[11].strip()
-        if conf < min_conf or len(text) < 3:
-            continue
-        alnum = sum(ch.isalnum() for ch in text)
-        if alnum / len(text) >= 0.7 and _WORD_OK.match(text):
-            n += 1
-    return n
-
-
-def _analyse(path: Path, tess: Tesseract, settings: ScanSettings,
-             cached_words: Optional[int] = None) -> PhotoInfo:
-    from PIL import Image, ImageOps
-
+def _analyse(path: Path, tess: Tesseract, settings: ScanSettings, opts: Options,
+             cached: Optional[dict] = None) -> PhotoInfo:
+    """Straighten, OCR, decide document-ness; for documents also orientation + name fields."""
     taken = None
     try:
-        with _open_image(path) as im:
-            im.load()
-            taken = _exif_time(im)
-            im = ImageOps.exif_transpose(im)
-            thumb = im.convert("RGB")
-            thumb.thumbnail((THUMB_SIZE, THUMB_SIZE))
-            im = im.convert("L")
-            if cached_words is not None:
-                return PhotoInfo(path=path, taken=taken or _fallback_time(path), words=cached_words,
-                                 is_document=cached_words >= settings.min_words, thumb=thumb)
-            scale = DETECT_LONG_EDGE / max(im.size)
-            im = im.resize((max(1, round(im.width * scale)), max(1, round(im.height * scale))),
-                           Image.LANCZOS)
-            im = flatten_lighting(im)
+        with _open_image(path) as raw:
+            taken = _exif_time(raw)
+        if taken is None:
+            taken = _fallback_time(path)
+        im = load_page(path, opts, max_edge=2000)
+        if cached is not None:
+            info = PhotoInfo(path=path, taken=taken, words=cached["words"],
+                             rotation=cached.get("rotation", 0),
+                             fields=DocFields.from_json(cached["fields"]) if cached.get("fields") else None)
+        else:
+            gray = flatten_lighting(_resize_long(im.convert("L"), DETECT_LONG_EDGE))
             with tempfile.TemporaryDirectory(prefix="photo2pdf-d-") as td:
-                img = Path(td) / "d.png"
-                im.save(img)
-                r = tess._run([img.name, "stdout", "--psm", "1", "tsv"], cwd=img.parent, timeout=120,
-                              threads=1)
-            words = count_words(r.stdout or "")
+                work = Path(td)
+                img = work / "d.png"
+                gray.save(img)
+                r = tess._run([img.name, "stdout", "-l", opts.language, "--psm", "1", "tsv"],
+                              cwd=work, timeout=180, threads=1)
+                tsv = r.stdout or ""
+                words = count_words(tsv)
+                info = PhotoInfo(path=path, taken=taken, words=words)
+                if words >= settings.min_words:
+                    info.rotation = find_rotation(im, tess, opts.language, work, threads=1)
+                    info.fields = extract(text_from_tsv(tsv))
+        info.is_document = info.words >= settings.min_words
+        thumb = rotate_cw(im, info.rotation) if info.is_document else im
+        thumb = thumb.copy()
+        thumb.thumbnail((THUMB_SIZE, THUMB_SIZE))
+        info.thumb = thumb
+        return info
     except Exception as exc:  # noqa: BLE001
-        return PhotoInfo(path=path, taken=_fallback_time(path), error=str(exc))
-    if taken is None:
-        taken = _fallback_time(path)
-    return PhotoInfo(path=path, taken=taken, words=words,
-                     is_document=words >= settings.min_words, thumb=thumb)
+        return PhotoInfo(path=path, taken=taken or _fallback_time(path), error=str(exc))
 
 
 def _fallback_time(path: Path) -> datetime:
@@ -180,9 +169,10 @@ def _cache_file() -> Path:
     return d / "scan-cache.json"
 
 
-def _cache_key(p: Path) -> str:
+def _cache_key(p: Path, opts: Options) -> str:
     st = p.stat()
-    return hashlib.sha1(f"{p.resolve()}|{st.st_size}|{st.st_mtime_ns}".encode()).hexdigest()
+    raw = f"{p.resolve()}|{st.st_size}|{st.st_mtime_ns}|{opts.language}|{opts.straighten}"
+    return hashlib.sha1(raw.encode()).hexdigest()
 
 
 def _load_cache() -> dict:
@@ -209,8 +199,14 @@ def scan_folder(
     progress: Optional[Callable[[int, int, str], None]] = None,
     cancel: Optional[threading.Event] = None,
     use_cache: bool = True,
+    opts: Optional[Options] = None,
 ) -> list[PhotoInfo]:
-    """Analyse every photo in `folder`. Returns PhotoInfo in time order."""
+    """Analyse every photo in `folder`. Returns PhotoInfo in time order.
+
+    The cache keeps word counts, rotation and the extracted name fields
+    (date / sender / type), never the full OCR text.
+    """
+    opts = opts or Options()
     progress = progress or (lambda d, t, m: None)
     paths = list_folder(folder, settings.recursive)
     total = len(paths)
@@ -224,16 +220,17 @@ def scan_folder(
         if cancel and cancel.is_set():
             return None
         try:
-            key = _cache_key(p)
+            key = _cache_key(p, opts)
         except OSError:
             key = None
         hit = cache.get(key) if key else None
-        info = _analyse(p, tess, settings, cached_words=hit["words"] if hit else None)
+        info = _analyse(p, tess, settings, opts, cached=hit)
         with lock:
             done += 1
             progress(done, total, f"Checked {done} of {total}: {p.name}")
             if use_cache and key and info.error is None:
-                cache[key] = {"words": info.words}
+                cache[key] = {"words": info.words, "rotation": info.rotation,
+                              "fields": info.fields.to_json() if info.fields else None}
         return info
 
     progress(0, total, f"Found {total} photos")
@@ -255,8 +252,22 @@ def scan_folder(
 # Grouping + editable plan
 # --------------------------------------------------------------------------
 
+def _new_letterhead(current: list[PhotoInfo], ph: PhotoInfo) -> bool:
+    """True when `ph` shows a different sender or document date than the document so far.
+
+    A follow-on page normally has no letterhead, or repeats the same one; a
+    different sender or date means a new letter was photographed right after.
+    """
+    if not ph.fields or not current:
+        return False
+    so_far = merge([p.fields for p in current if p.fields])
+    f = ph.fields
+    return bool((f.sender and so_far.sender and f.sender != so_far.sender)
+                or (f.date and so_far.date and f.date != so_far.date))
+
+
 def group_documents(photos: list[PhotoInfo], gap_seconds: int) -> list[list[PhotoInfo]]:
-    """Split time-ordered photos into documents; non-documents act as separators."""
+    """Split time-ordered photos into documents; non-documents and folder changes act as separators."""
     groups: list[list[PhotoInfo]] = []
     current: list[PhotoInfo] = []
     prev: Optional[PhotoInfo] = None
@@ -267,7 +278,9 @@ def group_documents(photos: list[PhotoInfo], gap_seconds: int) -> list[list[Phot
                 current = []
             prev = None
             continue
-        if prev is not None and (ph.taken - prev.taken).total_seconds() > gap_seconds:
+        if prev is not None and ((ph.taken - prev.taken).total_seconds() > gap_seconds
+                                 or ph.path.parent != prev.path.parent
+                                 or _new_letterhead(current, ph)):
             groups.append(current)
             current = []
         current.append(ph)
@@ -283,6 +296,7 @@ class Plan:
 
     groups: list[list[PhotoInfo]]
     others: list[PhotoInfo]  # not documents (or removed by the user)
+    custom_names: dict = field(default_factory=dict)  # first page path -> name typed by the user
 
     @classmethod
     def from_scan(cls, photos: list[PhotoInfo], gap_seconds: int) -> "Plan":
@@ -311,6 +325,20 @@ class Plan:
             self.groups.pop(g)
         self.others.insert(0, ph)
 
+    def rotate(self, g: int, i: int, degrees_cw: int) -> None:
+        ph = self.groups[g][i]
+        ph.rotation = (ph.rotation + degrees_cw) % 360
+        if ph.thumb is not None:
+            ph.thumb = rotate_cw(ph.thumb, degrees_cw)
+
+    def set_name(self, g: int, name: str) -> None:
+        name = name.strip()
+        key = self.groups[g][0].path
+        if name:
+            self.custom_names[key] = sanitize(name[:-4] if name.lower().endswith(".pdf") else name) + ".pdf"
+        else:
+            self.custom_names.pop(key, None)
+
     def move(self, g: int, i: int, delta: int) -> None:
         grp = self.groups[g]
         j = i + delta
@@ -325,11 +353,21 @@ class Plan:
             idx += 1
         self.groups.insert(idx, [ph])
 
-    def output_names(self) -> list[str]:
-        names = []
+    def suggested_name(self, g: int) -> str:
+        grp = self.groups[g]
         width = max(2, len(str(len(self.groups))))
-        for n, grp in enumerate(self.groups, 1):
-            t = grp[0].taken
-            pages = f"{len(grp)} page" + ("s" if len(grp) != 1 else "")
-            names.append(f"Document {n:0{width}d} - {t:%Y-%m-%d %H.%M} ({pages}).pdf")
+        t = grp[0].taken
+        pages = f"{len(grp)} page" + ("s" if len(grp) != 1 else "")
+        fallback = f"Document {g + 1:0{width}d} - {t:%Y-%m-%d %H.%M} ({pages}).pdf"
+        fields = merge([p.fields for p in grp if p.fields])
+        return suggest_name(fields, fallback)
+
+    def output_names(self) -> list[str]:
+        """Final names: user's edit, else content-based suggestion, else dated fallback. Unique."""
+        names, seen = [], {}
+        for g, grp in enumerate(self.groups):
+            name = self.custom_names.get(grp[0].path) or self.suggested_name(g)
+            stem, n = name[:-4], seen.get(name.lower(), 0)
+            seen[name.lower()] = n + 1
+            names.append(name if n == 0 else f"{stem} ({n + 1}).pdf")
         return names

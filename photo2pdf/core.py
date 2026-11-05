@@ -45,10 +45,21 @@ class Options:
     combine: bool = True          # one PDF for all photos vs one per photo
     ocr: bool = True              # searchable text layer
     grayscale: bool = False       # smaller files
-    auto_rotate: bool = True      # Tesseract orientation detection (needs OCR engine)
-    language: str = "eng"         # Tesseract language code(s), e.g. "eng+deu"
+    auto_rotate: bool = True      # 0/90/180/270 orientation fix (needs OCR engine)
+    straighten: bool = True       # perspective correction + deskew (OpenCV)
+    language: str = "nld+eng"     # Tesseract language code(s)
+    auto_name: bool = True        # name combined PDFs from their content (date, sender, type)
     max_long_edge: int = 3508     # px; 3508 = A4 long edge at 300 dpi
     jpeg_quality: int = 85
+
+
+@dataclass
+class PageSpec:
+    """A page to render. rotation=None means detect automatically; an int is
+    the clockwise turn to apply after straightening (from the review screen)."""
+
+    path: Path
+    rotation: Optional[int] = None
 
 
 @dataclass
@@ -181,24 +192,31 @@ class Tesseract:
         lines = (r.stdout or "").splitlines()
         return {ln.strip() for ln in lines[1:] if ln.strip()}
 
-    def detect_rotation(self, image: Path, min_confidence: float = 2.0) -> int:
-        """Degrees Tesseract says the page must be turned clockwise (0/90/180/270).
-
-        Returns 0 when detection fails or is unsure (blank or sparse pages).
-        The confidence threshold is a heuristic, not a Tesseract-documented value.
-        """
+    def osd(self, image: Path) -> Optional[tuple[int, float]]:
+        """(clockwise degrees to turn upright, confidence) from Tesseract OSD, or None."""
         try:
             r = self._run([image.name, "stdout", "--psm", "0"], cwd=image.parent, timeout=60)
         except (OSError, subprocess.SubprocessError):
-            return 0
+            return None
         out = (r.stdout or "") + (r.stderr or "")
         rot = re.search(r"Rotate:\s*(\d+)", out)
         conf = re.search(r"Orientation confidence:\s*([\d.]+)", out)
         if r.returncode != 0 or not rot or not conf:
+            return None
+        return int(rot.group(1)) % 360, float(conf.group(1))
+
+    def detect_rotation(self, image: Path, min_confidence: float = 2.0) -> int:
+        """OSD-only rotation (clockwise degrees); 0 when unsure. See find_rotation for the robust path."""
+        res = self.osd(image)
+        return res[0] if res and res[1] >= min_confidence else 0
+
+    def word_count(self, image: Path, language: str, psm: int = 3, threads: Optional[int] = None) -> int:
+        try:
+            r = self._run([image.name, "stdout", "-l", language, "--psm", str(psm), "tsv"],
+                          cwd=image.parent, timeout=120, threads=threads)
+        except (OSError, subprocess.SubprocessError):
             return 0
-        if float(conf.group(1)) < min_confidence:
-            return 0
-        return int(rot.group(1)) % 360
+        return count_words(r.stdout or "")
 
     def render_pdf(self, image: Path, language: str) -> Path:
         """One-page searchable PDF next to `image`. Raises RuntimeError on failure."""
@@ -254,35 +272,119 @@ def flatten_lighting(im):
     ).convert("L")
 
 
-def prepare_page(src: Path, dst: Path, opts: Options, extra_rotation: int = 0) -> Path:
-    """Write a normalised JPEG for one photo. Returns dst."""
+_WORD_OK = re.compile(r"^[^\W_]{3,}$|^[^\W_][\w'’.,:/\-]{2,}$", re.UNICODE)
+
+
+def count_words(tsv: str, min_conf: float = 60.0) -> int:
+    """Confident, word-like tokens in Tesseract TSV output (>=3 chars, mostly alphanumeric)."""
+    n = 0
+    for line in tsv.splitlines()[1:]:
+        cols = line.split("\t")
+        if len(cols) < 12:
+            continue
+        try:
+            conf = float(cols[10])
+        except ValueError:
+            continue
+        text = cols[11].strip()
+        if conf < min_conf or len(text) < 3:
+            continue
+        alnum = sum(ch.isalnum() for ch in text)
+        if alnum / len(text) >= 0.7 and _WORD_OK.match(text):
+            n += 1
+    return n
+
+
+def _resize_long(im, long_edge: int):
+    from PIL import Image
+
+    scale = long_edge / max(im.size)
+    if abs(scale - 1) < 1e-3:
+        return im
+    return im.resize((max(1, round(im.width * scale)), max(1, round(im.height * scale))), Image.LANCZOS)
+
+
+def load_page(src: Path, opts: Options, max_edge: int = 5000):
+    """Open a photo upright per EXIF, flatten alpha, cap size, straighten. Returns RGB PIL image."""
     from PIL import Image, ImageOps
 
     with _open_image(src) as im:
         im.load()
         im = ImageOps.exif_transpose(im)
-        if extra_rotation:
-            # Tesseract reports clockwise degrees; PIL rotates counter-clockwise.
-            im = im.rotate(-extra_rotation, expand=True)
         if im.mode in ("RGBA", "LA", "P"):
             im = im.convert("RGBA")
             bg = Image.new("RGB", im.size, "white")
             bg.paste(im, mask=im.getchannel("A"))
             im = bg
-        im = im.convert("L" if opts.grayscale else "RGB")
-        long_edge = max(im.size)
-        if long_edge > opts.max_long_edge:
-            scale = opts.max_long_edge / long_edge
-            im = im.resize(
-                (max(1, round(im.width * scale)), max(1, round(im.height * scale))),
-                Image.LANCZOS,
-            )
-        if opts.grayscale:
-            im = flatten_lighting(im)
-        w_in, h_in = (A4_W_IN, A4_H_IN) if im.height >= im.width else (A4_H_IN, A4_W_IN)
-        dpi = max(im.width / w_in, im.height / h_in, 1.0)
-        im.save(dst, "JPEG", quality=opts.jpeg_quality, dpi=(dpi, dpi), optimize=True)
+        im = im.convert("RGB")
+    if max(im.size) > max_edge:
+        im = _resize_long(im, max_edge)
+    if opts.straighten:
+        try:
+            import numpy as np
+
+            from photo2pdf.geometry import straighten
+
+            arr, info = straighten(np.asarray(im))
+            im = Image.fromarray(arr)
+        except ImportError:
+            pass  # OpenCV missing: skip straightening, everything else still works
+    return im
+
+
+def rotate_cw(im, degrees: int):
+    """Rotate a PIL image clockwise by a multiple of 90 (PIL rotates counter-clockwise)."""
+    degrees %= 360
+    return im.rotate(-degrees, expand=True) if degrees else im
+
+
+def find_rotation(im, tess: Tesseract, language: str, work: Path,
+                  osd_confident: float = 3.0, threads: Optional[int] = None) -> int:
+    """Clockwise degrees (0/90/180/270) that make the page upright.
+
+    1. Tesseract OSD on a cleaned 1600 px greyscale copy; accepted when its
+       confidence is >= `osd_confident` (heuristic threshold).
+    2. Otherwise OCR the copy at all four rotations and keep the one with the
+       most confident words, if it clearly wins (>= 5 words and 1.3x the
+       runner-up). Text read the wrong way up produces few confident words.
+    3. Otherwise a weak OSD answer, else 0.
+    """
+    small = flatten_lighting(_resize_long(im.convert("L"), 1600))
+    probe = work / "orient.png"
+    small.save(probe)
+    osd = tess.osd(probe)
+    if osd and osd[1] >= osd_confident:
+        return osd[0]
+    counts = {}
+    for deg in (0, 90, 180, 270):
+        rotate_cw(small, deg).save(probe)
+        counts[deg] = tess.word_count(probe, language, psm=3, threads=threads)
+    ranked = sorted(counts.items(), key=lambda kv: -kv[1])
+    (best, n1), (_, n2) = ranked[0], ranked[1]
+    if n1 >= 5 and n1 >= 1.3 * max(n2, 1):
+        return best
+    if osd and osd[1] >= 0.5:
+        return osd[0]
+    return 0
+
+
+def finish_page(im, opts: Options, rotation: int, dst: Path) -> Path:
+    """Rotate, optionally clean to greyscale, cap resolution, write JPEG with ~A4 DPI."""
+    im = rotate_cw(im, rotation)
+    im = im.convert("L" if opts.grayscale else "RGB")
+    if max(im.size) > opts.max_long_edge:
+        im = _resize_long(im, opts.max_long_edge)
+    if opts.grayscale:
+        im = flatten_lighting(im)
+    w_in, h_in = (A4_W_IN, A4_H_IN) if im.height >= im.width else (A4_H_IN, A4_W_IN)
+    dpi = max(im.width / w_in, im.height / h_in, 1.0)
+    im.save(dst, "JPEG", quality=opts.jpeg_quality, dpi=(dpi, dpi), optimize=True)
     return dst
+
+
+def prepare_page(src: Path, dst: Path, opts: Options, extra_rotation: int = 0) -> Path:
+    """Write a normalised JPEG for one photo (no automatic orientation). Returns dst."""
+    return finish_page(load_page(src, opts), opts, extra_rotation, dst)
 
 
 def _image_only_pdf(jpg: Path) -> Path:
@@ -311,25 +413,32 @@ def _merge(pages: list[Path], out: Path) -> None:
 # --------------------------------------------------------------------------
 
 def _render_pages(
-    images: list[Path], work: Path, opts: Options, tess: Optional[Tesseract],
+    images: list, work: Path, opts: Options, tess: Optional[Tesseract],
     result: Result, progress: ProgressFn, start: int, total: int,
 ) -> list[tuple[Path, Path]]:
-    """One single-page PDF per image in `work`. Unreadable images become warnings."""
+    """One single-page PDF per image (Path or PageSpec) in `work`. Unreadable images become warnings."""
     pages: list[tuple[Path, Path]] = []
-    for k, src in enumerate(images):
+    for k, item in enumerate(images):
+        spec = item if isinstance(item, PageSpec) else PageSpec(Path(item))
+        src = spec.path
         n = start + k
         progress(n, total, f"Page {n + 1} of {total}: {src.name}")
         stem = f"p{n:05d}"  # ASCII temp names: Tesseract is fragile with non-ASCII paths
         try:
-            jpg = prepare_page(src, work / f"{stem}.jpg", opts)
+            im = load_page(src, opts)
         except Exception as exc:  # noqa: BLE001 - report and keep going
             result.warnings.append(f"Skipped {src.name}: could not read image ({exc})")
             continue
+        rotation = spec.rotation
+        if rotation is None:
+            rotation = 0
+            if tess and opts.auto_rotate:
+                try:
+                    rotation = find_rotation(im, tess, opts.language, work)
+                except Exception as exc:  # noqa: BLE001
+                    result.warnings.append(f"{src.name}: could not check rotation ({exc})")
+        jpg = finish_page(im, opts, rotation, work / f"{stem}.jpg")
         if tess and opts.ocr:
-            if opts.auto_rotate:
-                rot = tess.detect_rotation(jpg)
-                if rot:
-                    prepare_page(src, jpg, opts, extra_rotation=rot)
             try:
                 pdf = tess.render_pdf(jpg, opts.language)
             except Exception as exc:  # noqa: BLE001
@@ -341,8 +450,25 @@ def _render_pages(
     return pages
 
 
+def _content_name(page_pdfs: list[Path]) -> Optional[str]:
+    """Name from the OCR text layer of the first pages, or None if nothing clear was found."""
+    from pypdf import PdfReader
+
+    from photo2pdf.naming import extract, merge, suggest_name
+
+    fields = []
+    for pdf in page_pdfs[:3]:
+        try:
+            fields.append(extract(PdfReader(str(pdf)).pages[0].extract_text() or ""))
+        except Exception:  # noqa: BLE001
+            continue
+    f = merge(fields)
+    return suggest_name(f, "") or None if not f.empty() else None
+
+
 def _resolve_tess(opts: Options, tesseract: Optional[Tesseract], result: Result) -> Optional[Tesseract]:
-    tess = tesseract if tesseract is not None else (Tesseract.find() if opts.ocr else None)
+    want = opts.ocr or opts.auto_rotate
+    tess = tesseract if tesseract is not None else (Tesseract.find() if want else None)
     if opts.ocr and tess is None:
         result.warnings.append("Text recognition engine not found; PDFs are not searchable.")
     return tess
@@ -371,6 +497,10 @@ def convert(
         progress(total, total, "Saving…")
         if opts.combine:
             out = combined_output_path([s for s, _ in pages])
+            if opts.auto_name and tess and opts.ocr:
+                named = _content_name([p for _, p in pages])
+                if named:
+                    out = unique_path(out.parent / named)
             _merge([p for _, p in pages], out)
             result.outputs.append(out)
         else:
@@ -384,14 +514,14 @@ def convert(
 
 
 def save_documents(
-    documents: list[tuple[str, list[Path]]],
+    documents: list[tuple[str, list]],
     out_dir: Path,
     opts: Options,
     progress: Optional[ProgressFn] = None,
     tesseract: Optional[Tesseract] = None,
     cancel=None,
 ) -> Result:
-    """Folder mode: write each (file name, ordered photos) as one multi-page PDF in out_dir.
+    """Folder mode: write each (file name, ordered Paths or PageSpecs) as one multi-page PDF in out_dir.
 
     Page order is kept exactly as given (the review screen decides it).
     """

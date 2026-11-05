@@ -6,10 +6,11 @@ import pytest
 from PIL import Image, ImageDraw
 from pypdf import PdfReader
 
-from photo2pdf.core import Options, save_documents
+from photo2pdf.core import Options, convert, save_documents
 from photo2pdf.detect import (
-    Plan, PhotoInfo, ScanSettings, count_words, group_documents, scan_folder, time_from_name,
+    Plan, PhotoInfo, ScanSettings, group_documents, scan_folder, time_from_name,
 )
+from photo2pdf.core import count_words
 from test_core import text_page
 
 needs_tess = pytest.mark.skipif(shutil.which("tesseract") is None, reason="tesseract not installed")
@@ -121,3 +122,67 @@ def test_scan_folder_end_to_end(tmp_path, monkeypatch):
 def _tess():
     from photo2pdf.core import Tesseract
     return Tesseract.find()
+
+
+@needs_tess
+def test_angled_upside_down_dutch_letter_end_to_end(tmp_path, monkeypatch):
+    from synth import camera_corners, photo_of, tax_letter
+
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "cache"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    folder = tmp_path / "archive"
+    folder.mkdir()
+    # Shot at an angle and upside down (roll ~180): needs perspective + orientation fixes.
+    photo_of(tax_letter(), camera_corners(tilt_x=30, tilt_y=10, roll=176, dist=430), seed=3) \
+        .save(folder / "IMG_20250315_101500.jpg")
+    _photo(folder / "IMG_20250315_101600.jpg", datetime(2025, 3, 15, 10, 16))
+
+    infos = scan_folder(folder, ScanSettings(workers=2), _tess(), opts=Options())
+    doc = infos[0]
+    assert doc.is_document and not infos[1].is_document
+    assert doc.rotation == 180
+    plan = Plan.from_scan(infos, 180)
+    assert plan.output_names() == [
+        "2025-03-14 Belastingdienst - Voorlopige aanslag inkomstenbelasting 2025.pdf"]
+
+    plan.set_name(0, "Mijn aanslag")
+    assert plan.output_names() == ["Mijn aanslag.pdf"]
+
+    from photo2pdf.core import PageSpec
+    docs = [(n, [PageSpec(p.path, p.rotation) for p in g]) for n, g in zip(plan.output_names(), plan.groups)]
+    res = save_documents(docs, folder / "PDFs", Options())
+    assert not res.warnings, res.warnings
+    pg = PdfReader(str(res.outputs[0])).pages[0]
+    assert "voorlopige aanslag" in pg.extract_text().lower()
+    assert abs(float(pg.mediabox.height) / float(pg.mediabox.width) - 297 / 210) < 0.05
+
+
+@needs_tess
+def test_quick_mode_names_combined_pdf_from_content(tmp_path):
+    from synth import tax_letter
+
+    tax_letter().rotate(90, expand=True).save(tmp_path / "IMG_1.jpg")  # sideways, tight crop
+    res = convert([tmp_path], Options(combine=True))
+    assert [p.name for p in res.outputs] == [
+        "2025-03-14 Belastingdienst - Voorlopige aanslag inkomstenbelasting 2025.pdf"]
+
+
+def test_plan_rotate_and_group_by_folder():
+    a, b = ph("x/a1", 0), ph("y/b1", 10)
+    plan = Plan.from_scan([a, b], 180)
+    assert len(plan.groups) == 2  # different folders never merge
+    plan.rotate(0, 0, 90)
+    plan.rotate(0, 0, 270)
+    assert plan.groups[0][0].rotation == 0
+
+
+def test_new_letterhead_splits_even_within_time_gap():
+    from datetime import date as d
+    from photo2pdf.naming import DocFields
+    a1, a2, b1 = ph("a1", 0), ph("a2", 20), ph("b1", 40)
+    a1.fields = DocFields(sender="Belastingdienst", date=d(2025, 3, 14))
+    a2.fields = DocFields()  # follow-on page, no letterhead
+    b1.fields = DocFields(sender="Gemeente Utrecht", date=d(2025, 2, 28))
+    assert names(group_documents([a1, a2, b1], 180)) == [["a1", "a2"], ["b1"]]
+    b1.fields = DocFields(sender="Belastingdienst", date=d(2025, 3, 14))  # same letter repeated header
+    assert names(group_documents([a1, a2, b1], 180)) == [["a1", "a2", "b1"]]

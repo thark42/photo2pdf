@@ -1,8 +1,9 @@
 PHOTOS TO PDF
 =============
 
-Turns photos of documents into PDF files. Everything happens on this
-computer: nothing is uploaded anywhere, and it works without internet.
+Turns photos of documents (Dutch or English) into searchable PDF files.
+Everything happens on this computer: nothing is uploaded anywhere, and it
+works without internet.
 
 
 THREE WAYS TO USE IT
@@ -32,13 +33,24 @@ receipts? Click "Find the documents in a folder of photos..." (or drag
 the folder into the window, or right-click the folder > Send to >
 Photos to PDF).
 
+Tick "include its subfolders" first if your photos are spread over
+several folders.
+
 The app looks at every photo and picks out the ones with a page of text
-in them. Photos taken within a few minutes of each other become one
-multi-page PDF; a gap, or an ordinary photo in between, starts a new one.
+in them. It straightens pages that were photographed at an angle and
+turns sideways or upside-down pages the right way up. Photos taken within
+a few minutes of each other become one multi-page PDF; a gap, an ordinary
+photo in between, or a page from a different sender starts a new one.
+
+It also reads each letter to suggest a file name, for example:
+   2025-03-14 Belastingdienst - Voorlopige aanslag inkomstenbelasting 2025
+When the date, sender or type isn't clear, it uses a plain name like
+"Document 03 - 2025-03-15 10.15 (2 pages)" instead.
 
 You then get a screen showing what it found:
-- Click a page to move it left/right, start a new document from it, or
-  remove it.
+- Click a page to rotate it, move it left/right, start a new document
+  from it, or remove it.
+- Click a file name to change it.
 - "Join with document above" merges two documents into one.
 - "Not a document" drops a whole group.
 - Under "Other photos", click a photo that the app missed to add it.
@@ -67,8 +79,10 @@ OPTIONS (in the app window; remembered for next time)
 TIPS FOR BETTER RESULTS
 -----------------------
 
-- Photograph the page straight from above, in good light, filling the
-  frame. The app does not straighten pages photographed at an angle.
+- Pages photographed at an angle are straightened automatically, as long
+  as all four corners of the page are in the photo and the page stands
+  out from what it's lying on. Curved pages (open books) and folded pages
+  are not flattened.
 - iPhone photos (.HEIC) work as they are.
 
 
