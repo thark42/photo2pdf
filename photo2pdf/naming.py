@@ -295,6 +295,36 @@ def text_from_tsv(tsv: str) -> str:
     return "\n".join(" ".join(lines[k]) for k in order)
 
 
+def rows_from_tsv(tsv: str) -> str:
+    """Rebuild text by visual row from word positions, ignoring Tesseract's blocks.
+
+    On till slips Tesseract often returns the label column and the amount column as
+    separate blocks ("TOTAAL" ... ten lines later ... "12,16"). Grouping words whose
+    vertical centres line up puts each label back next to its amount."""
+    words = []
+    for row in tsv.splitlines()[1:]:
+        c = row.split("\t")
+        if len(c) < 12 or c[0] != "5" or not c[11].strip():
+            continue
+        try:
+            left, top, h = int(c[6]), int(c[7]), int(c[9])
+        except ValueError:
+            continue
+        words.append((top + h / 2, left, max(h, 1), c[11].strip()))
+    if not words:
+        return ""
+    heights = sorted(w[2] for w in words)
+    tol = 0.6 * heights[len(heights) // 2]
+    words.sort()
+    rows: list[list[tuple]] = []
+    for w in words:
+        if rows and abs(w[0] - sum(x[0] for x in rows[-1]) / len(rows[-1])) <= tol:
+            rows[-1].append(w)
+        else:
+            rows.append([w])
+    return "\n".join(" ".join(x[3] for x in sorted(r, key=lambda x: x[1])) for r in rows)
+
+
 # ==========================================================================
 # Cards: ID cards, passports, driving licences, insurance, bank and loyalty cards
 # ==========================================================================
@@ -586,6 +616,11 @@ def extract_receipt(text: str, today: Optional[date] = None) -> DocFields:
     if totals:
         f.extra["total"] = max(totals, key=lambda t: float(t))
     return f
+
+
+def receipt_total_by_row(tsv: str) -> Optional[str]:
+    """Total read from visual rows (see rows_from_tsv), for when block order split it off."""
+    return extract_receipt(rows_from_tsv(tsv)).extra.get("total")
 
 
 def extract_confirmation(text: str, today: Optional[date] = None) -> Optional[DocFields]:

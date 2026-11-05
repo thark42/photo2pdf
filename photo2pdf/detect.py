@@ -218,6 +218,12 @@ def _measure(path, im, taken, tess, settings, opts, screenshot, ft, cls) -> Phot
 
         feat.update(ft.find_codes(im) if is_ticket_text(text) else {"qr": False, "barcode": False})
         decision = cls.classify(feat, text, settings.min_words)
+        if decision.kind == "receipt" and decision.fields is not None and "total" not in decision.fields.extra:
+            from photo2pdf.naming import receipt_total_by_row
+
+            total = receipt_total_by_row(tsv)
+            if total:
+                decision.fields.extra["total"] = total
         info = PhotoInfo(path=path, taken=taken, words=words, card_shape=card_shape,
                          kind=decision.kind or "page", is_document=decision.is_document,
                          reason=decision.reason, fields=decision.fields, screenshot=screenshot,

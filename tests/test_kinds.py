@@ -171,5 +171,24 @@ def test_receipt_photo_total_from_real_ocr(tmp_path):
         r = tess._run(["d.png", "stdout", "-l", "nld+eng", "--psm", "1", "tsv"], cwd=Path(td), timeout=180,
                       threads=1)
     text = text_from_tsv(r.stdout or "")
-    f = naming.extract_receipt(text, TODAY)
-    assert f.extra.get("total") == "12.16", f"OCR text was:\n{text}"
+    total = naming.extract_receipt(text, TODAY).extra.get("total") or naming.receipt_total_by_row(r.stdout)
+    assert total == "12.16", f"OCR text was:\n{text}\n\nby row:\n{naming.rows_from_tsv(r.stdout)}"
+
+
+def _tsv(words):
+    """TSV rows (level 5) for (block, left, top, text) words, height 30."""
+    head = "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext"
+    rows = [f"5\t1\t{b}\t1\t{i}\t1\t{x}\t{y}\t60\t30\t95\t{t}" for i, (b, x, y, t) in enumerate(words)]
+    return "\n".join([head] + rows)
+
+
+def test_receipt_total_when_amounts_come_back_as_a_separate_block():
+    # What Tesseract returned on Windows: all labels in one block, all amounts in a later one.
+    tsv = _tsv([(1, 30, 40, "ALBERT"), (1, 120, 40, "HEIJN"), (1, 30, 100, "BANANEN"),
+                (1, 30, 160, "SUBTOTAAL"), (1, 30, 220, "TOTAAL"), (1, 30, 280, "PINNEN"),
+                (1, 30, 340, "BTW"), (1, 90, 340, "9%"),
+                (2, 400, 102, "1,99"), (2, 400, 158, "12,16"), (2, 400, 221, "12,16"),
+                (2, 400, 281, "12,16"), (2, 400, 339, "1,00")])
+    assert naming.extract_receipt(naming.text_from_tsv(tsv), TODAY).extra.get("total") is None
+    assert naming.rows_from_tsv(tsv).splitlines()[3] == "TOTAAL 12,16"
+    assert naming.receipt_total_by_row(tsv) == "12.16"
