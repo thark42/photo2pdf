@@ -78,12 +78,11 @@ Severity:
 
 ## High
 
-### H1. The UI is English only, but the documents (and probably the user) are Dutch
-Every label, hint, warning and the help file is English. If her English is
-not comfortable, the test measures translation, not the app.
-**Fix:** decide the UI language before testing. All strings are in two
-files, so a Dutch string table is a small job. *(Your call: what language
-does she use day to day?)*
+### H1. Language: decided, the UI stays English
+**Decision (2026-11-05, operator):** keep the application in English. OCR,
+naming and document handling stay Dutch + English. When observing the
+test, separate hesitation caused by wording from hesitation caused by the
+interaction itself.
 
 ### H2. Page actions are hidden behind a left-click on a small thumbnail
 - **Evidence:** rotate, move, split and remove only appear in a popup menu
@@ -252,10 +251,8 @@ creating the Tk root, then re-check B1 sizing with real scaling.
 
 1. B1–B4 (layout, data loss, duplicates, multi-folder drop). Roughly half
    a day.
-2. H1 language decision. Translating is about half a day if Dutch is
-   needed.
-3. H2–H4 (visible page controls, large preview, undo).
-4. H5–H7 and M8, after a first look on a real Windows laptop.
+2. H2–H4 (visible page controls, large preview, undo).
+3. H5–H7 and M8, after a first look on a real Windows laptop.
 
 Everything else can wait for her feedback. The diagnostic log already
 records every review correction, which is better evidence than guesses for
