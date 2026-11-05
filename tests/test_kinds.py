@@ -149,3 +149,27 @@ def test_screenshots_are_never_warped(tmp_path):
     pg = PdfReader(str(res.outputs[0])).pages[0]
     w, h = float(pg.mediabox.width), float(pg.mediabox.height)
     assert abs(h / w - 2340 / 1080) < 0.01      # full screen kept, aspect unchanged
+
+
+@needs_tess
+def test_receipt_photo_total_from_real_ocr(tmp_path):
+    """Same OCR path as the folder scan, on the synthetic receipt photo. On failure the
+    message shows what Tesseract read (synthetic text, nothing private)."""
+    import tempfile
+
+    from photo2pdf import detect
+    from photo2pdf.core import Tesseract, flatten_lighting, load_page
+    from photo2pdf.naming import text_from_tsv
+
+    src = tmp_path / "r.jpg"
+    receipt_photo(seed=5).save(src)
+    im = load_page(src, Options(), max_edge=2000)
+    gray = flatten_lighting(detect._resize_long(im.convert("L"), detect.DETECT_LONG_EDGE))
+    tess = Tesseract.find()
+    with tempfile.TemporaryDirectory() as td:
+        gray.save(Path(td) / "d.png")
+        r = tess._run(["d.png", "stdout", "-l", "nld+eng", "--psm", "1", "tsv"], cwd=Path(td), timeout=180,
+                      threads=1)
+    text = text_from_tsv(r.stdout or "")
+    f = naming.extract_receipt(text, TODAY)
+    assert f.extra.get("total") == "12.16", f"OCR text was:\n{text}"
