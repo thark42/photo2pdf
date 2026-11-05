@@ -97,7 +97,8 @@ def test_convert_reports_bad_image_and_continues(tmp_path):
     (tmp_path / "bad.jpg").write_bytes(b"not an image")
     res = convert([tmp_path], Options(ocr=False))
     assert len(res.outputs) == 1
-    assert any("bad.jpg" in w for w in res.warnings)
+    assert res.skipped == ["bad.jpg"]
+    assert "1 photo could not be opened and was left out." in res.summary_lines()
 
 
 def test_convert_no_images(tmp_path):
@@ -141,7 +142,8 @@ def test_bad_language_falls_back_to_image_only(tmp_path):
     text_page(tmp_path / "a.jpg")
     res = convert([tmp_path], Options(ocr=True, language="zzz"))
     assert len(res.outputs) == 1
-    assert any("text recognition failed" in w for w in res.warnings)
+    assert res.no_text == ["a.jpg"]
+    assert any("saved but not searchable" in ln for ln in res.summary_lines())
 
 
 def test_heic_input(tmp_path):

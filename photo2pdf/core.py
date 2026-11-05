@@ -50,7 +50,8 @@ class Options:
     auto_rotate: bool = True      # 0/90/180/270 orientation fix (needs OCR engine)
     straighten: bool = True       # perspective correction + deskew (OpenCV)
     language: str = "nld+eng"     # Tesseract language code(s)
-    auto_name: bool = True        # name combined PDFs from their content (date, sender, type)
+    auto_name: bool = True        # name PDFs from their content (date, sender, type)
+    organize: str = "year"        # folder mode: subfolders "none" | "year" | "sender" | "sender_year"
     max_long_edge: int = 3508     # px; 3508 = A4 long edge at 300 dpi
     jpeg_quality: int = 85
 
@@ -66,8 +67,58 @@ class PageSpec:
 
 @dataclass
 class Result:
+    """Outcome of a run, kept structured so the UI can explain it in plain words."""
+
     outputs: list[Path] = field(default_factory=list)
-    warnings: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)   # other notes, already plain language
+    skipped: list[str] = field(default_factory=list)    # photo names that could not be opened
+    no_text: list[str] = field(default_factory=list)    # saved, but without searchable text
+    errors: list[str] = field(default_factory=list)     # unexpected failures (worth a report)
+    stopped: bool = False
+    saved: list[tuple[int, Path]] = field(default_factory=list)  # folder mode: (document index, pdf)
+
+    def problems(self) -> bool:
+        return bool(self.warnings or self.skipped or self.no_text or self.errors)
+
+    def summary_lines(self) -> list[str]:
+        """Short plain-language lines for the end-of-run message."""
+        lines = []
+        n = len(self.outputs)
+        if n:
+            lines.append(f"Saved {n} PDF{'s' if n != 1 else ''}.")
+        elif not self.stopped:
+            lines.append("Nothing was saved.")
+        if self.stopped:
+            lines.append("You stopped before the end. Everything finished so far has been kept.")
+        if self.skipped:
+            k = len(self.skipped)
+            lines.append(f"{k} photo{'s' if k != 1 else ''} could not be opened and "
+                         f"{'were' if k != 1 else 'was'} left out.")
+        if self.no_text:
+            k = len(self.no_text)
+            lines.append(f"{k} page{'s' if k != 1 else ''} could not be read, so "
+                         f"{'they are' if k != 1 else 'it is'} saved but not searchable.")
+        lines.extend(self.warnings)
+        if self.errors:
+            lines.append("Something unexpected went wrong. A problem report would help fix it.")
+        return lines
+
+    def detail_lines(self) -> list[str]:
+        out = []
+        out += [f"Could not open: {n}" for n in self.skipped]
+        out += [f"Not searchable: {n}" for n in self.no_text]
+        out += [f"Error: {e}" for e in self.errors]
+        return out
+
+
+def is_writable(folder: Path) -> bool:
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        probe = tempfile.NamedTemporaryFile(dir=folder, prefix=".photo2pdf-", delete=True)
+        probe.close()
+        return True
+    except OSError:
+        return False
 
 
 # --------------------------------------------------------------------------
@@ -424,11 +475,14 @@ def _merge(pages: list[Path], out: Path) -> None:
 
 def _render_pages(
     images: list, work: Path, opts: Options, tess: Optional[Tesseract],
-    result: Result, progress: ProgressFn, start: int, total: int,
+    result: Result, progress: ProgressFn, start: int, total: int, cancel=None,
 ) -> list[tuple[Path, Path]]:
-    """One single-page PDF per image (Path or PageSpec) in `work`. Unreadable images become warnings."""
+    """One single-page PDF per image (Path or PageSpec) in `work`. Unreadable images are listed in result.skipped."""
     pages: list[tuple[Path, Path]] = []
     for k, item in enumerate(images):
+        if cancel is not None and cancel.is_set():
+            result.stopped = True
+            break
         spec = item if isinstance(item, PageSpec) else PageSpec(Path(item))
         src = spec.path
         n = start + k
@@ -445,7 +499,7 @@ def _render_pages(
             im = load_page(src, opts)
         except Exception as exc:  # noqa: BLE001 - report and keep going
             logging.exception("could not read %s", src.name)
-            result.warnings.append(f"Skipped {src.name}: could not read image ({exc})")
+            result.skipped.append(src.name)
             continue
         rotation = spec.rotation
         if rotation is None:
@@ -455,14 +509,13 @@ def _render_pages(
                     rotation = find_rotation(im, tess, opts.language, work)
                 except Exception as exc:  # noqa: BLE001
                     logging.exception("rotation check failed for %s", src.name)
-                    result.warnings.append(f"{src.name}: could not check rotation ({exc})")
         jpg = finish_page(im, opts, rotation, work / f"{stem}.jpg")
         if tess and opts.ocr:
             try:
                 pdf = tess.render_pdf(jpg, opts.language)
             except Exception as exc:  # noqa: BLE001
                 logging.exception("OCR failed for %s", src.name)
-                result.warnings.append(f"{src.name}: text recognition failed ({exc}); saved without text")
+                result.no_text.append(src.name)
                 pdf = _image_only_pdf(jpg)
         else:
             pdf = _image_only_pdf(jpg)
@@ -496,7 +549,7 @@ def _resolve_tess(opts: Options, tesseract: Optional[Tesseract], result: Result)
     want = opts.ocr or opts.auto_rotate
     tess = tesseract if tesseract is not None else (Tesseract.find() if want else None)
     if opts.ocr and tess is None:
-        result.warnings.append("Text recognition engine not found; PDFs are not searchable.")
+        result.warnings.append("The text reader is missing, so the PDFs are not searchable.")
     return tess
 
 
@@ -505,20 +558,22 @@ def convert(
     opts: Options,
     progress: Optional[ProgressFn] = None,
     tesseract: Optional[Tesseract] = None,
+    cancel=None,
 ) -> Result:
     """Convert dropped/selected photos: one combined PDF, or one PDF per photo."""
     progress = progress or (lambda done, total, msg: None)
     result = Result()
     images = collect_images(inputs)
     if not images:
-        result.warnings.append("No photos found. Supported: " + ", ".join(sorted(IMAGE_EXTS)))
+        result.warnings.append("No photos were found. The app reads JPG, PNG, HEIC, WebP, TIFF, BMP and GIF.")
         return result
     tess = _resolve_tess(opts, tesseract, result)
 
     total = len(images)
     with tempfile.TemporaryDirectory(prefix="photo2pdf-") as td:
-        pages = _render_pages(images, Path(td), opts, tess, result, progress, 0, total)
-        if not pages:
+        pages = _render_pages(images, Path(td), opts, tess, result, progress, 0, total, cancel)
+        if not pages or result.stopped:
+            # A stopped quick conversion saves nothing: half a document is worse than none.
             return result
         progress(total, total, "Saving…")
         if opts.combine:
@@ -531,7 +586,10 @@ def convert(
             result.outputs.append(out)
         else:
             for src, pdf in pages:
-                out = unique_path(output_dir_for(src.parent) / f"{src.stem}.pdf")
+                name = f"{src.stem}.pdf"
+                if opts.auto_name and tess and opts.ocr:
+                    name = _content_name([pdf]) or name
+                out = unique_path(output_dir_for(src.parent) / name)
                 shutil.copyfile(pdf, out)
                 result.outputs.append(out)
 
@@ -547,10 +605,14 @@ def save_documents(
     tesseract: Optional[Tesseract] = None,
     cancel=None,
 ) -> Result:
-    """Folder mode: write each (file name, ordered Paths or PageSpecs) as one multi-page PDF in out_dir.
+    """Folder mode: write each (relative file name, ordered Paths or PageSpecs) as one PDF under out_dir.
 
-    Page order is kept exactly as given (the review screen decides it).
+    The name may include a subfolder ("2025/…pdf"). Page order is kept exactly
+    as given (the review screen decides it). Each saved document is recorded
+    in the registry so it isn't saved again next time.
     """
+    from photo2pdf import registry
+
     progress = progress or (lambda done, total, msg: None)
     result = Result()
     tess = _resolve_tess(opts, tesseract, result)
@@ -560,17 +622,22 @@ def save_documents(
     with tempfile.TemporaryDirectory(prefix="photo2pdf-") as td:
         for d, (name, imgs) in enumerate(documents):
             if cancel is not None and cancel.is_set():
-                result.warnings.append("Stopped before finishing; documents saved so far are kept.")
+                result.stopped = True
                 break
             work = Path(td) / f"d{d:04d}"
             work.mkdir()
-            pages = _render_pages(imgs, work, opts, tess, result, progress, done, total)
+            pages = _render_pages(imgs, work, opts, tess, result, progress, done, total, cancel)
             done += len(imgs)
+            if result.stopped:
+                break  # don't write a half-rendered document
             if not pages:
                 continue
             out = unique_path(out_dir / name)
+            out.parent.mkdir(parents=True, exist_ok=True)
             _merge([p for _, p in pages], out)
             result.outputs.append(out)
+            result.saved.append((d, out))
+            registry.record([s for s, _ in pages], out)
             from photo2pdf import diag
 
             diag.fields("saved document %d: %r (%d pages)", d + 1, out.name, len(pages))

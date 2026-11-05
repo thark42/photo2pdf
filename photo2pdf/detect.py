@@ -59,6 +59,7 @@ class PhotoInfo:
     is_document: bool = False
     rotation: int = 0                     # clockwise turn after straightening
     fields: Optional[DocFields] = None    # date / sender / type from OCR text
+    saved_as: Optional[Path] = None       # PDF this photo already went into (registry)
     error: Optional[str] = None
     thumb: Optional[object] = field(default=None, repr=False, compare=False)  # PIL.Image
 
@@ -171,6 +172,19 @@ def list_folder(folder: Path, recursive: bool = False) -> list[Path]:
     return sorted((p for p in it if p.is_file() and p.suffix.lower() in IMAGE_EXTS), key=natural_key)
 
 
+def list_inputs(paths: list[Path], recursive: bool = False) -> list[Path]:
+    """Photos from any mix of folders and files, de-duplicated."""
+    seen: dict[Path, None] = {}
+    for p in paths:
+        p = Path(p)
+        if p.is_dir():
+            for f in list_folder(p, recursive):
+                seen.setdefault(f.resolve(), None)
+        elif p.is_file() and p.suffix.lower() in IMAGE_EXTS:
+            seen.setdefault(p.resolve(), None)
+    return list(seen)
+
+
 # -- cache -----------------------------------------------------------------
 
 def _cache_file() -> Path:
@@ -203,8 +217,12 @@ def _save_cache(entries: dict) -> None:
         pass
 
 
-def scan_folder(
-    folder: Path,
+def scan_folder(folder: Path, settings: "ScanSettings", tess: Tesseract, **kw) -> list[PhotoInfo]:
+    return scan_paths([folder], settings, tess, **kw)
+
+
+def scan_paths(
+    inputs: list[Path],
     settings: ScanSettings,
     tess: Tesseract,
     progress: Optional[Callable[[int, int, str], None]] = None,
@@ -212,14 +230,14 @@ def scan_folder(
     use_cache: bool = True,
     opts: Optional[Options] = None,
 ) -> list[PhotoInfo]:
-    """Analyse every photo in `folder`. Returns PhotoInfo in time order.
+    """Analyse every photo in `inputs` (folders and/or files). Returns PhotoInfo in time order.
 
     The cache keeps word counts, rotation and the extracted name fields
     (date / sender / type), never the full OCR text.
     """
     opts = opts or Options()
     progress = progress or (lambda d, t, m: None)
-    paths = list_folder(folder, settings.recursive)
+    paths = list_inputs(list(inputs), settings.recursive)
     total = len(paths)
     cache = _load_cache() if use_cache else {}
     results: list[PhotoInfo] = []
@@ -258,6 +276,11 @@ def scan_folder(
     for r in results:
         r.is_document = r.error is None and r.words >= settings.min_words
     results.sort(key=lambda r: (r.taken, natural_key(r.path)))
+    from photo2pdf import registry
+
+    saved = registry.lookup([r.path for r in results])
+    for r in results:
+        r.saved_as = saved.get(r.path)
     n_doc = sum(r.is_document for r in results)
     n_err = sum(r.error is not None for r in results)
     logging.info("scan_folder done: %d checked, %d documents, %d errors, cancelled=%s (%.1fs)",
@@ -308,6 +331,14 @@ def group_documents(photos: list[PhotoInfo], gap_seconds: int) -> list[list[Phot
     return groups
 
 
+ORGANIZE_CHOICES = {
+    "none": "All in one folder",
+    "year": "One folder per year",
+    "sender": "One folder per sender",
+    "sender_year": "Per sender, then per year",
+}
+
+
 @dataclass
 class Plan:
     """What will be saved. The review screen edits this; the tests exercise it directly."""
@@ -315,6 +346,8 @@ class Plan:
     groups: list[list[PhotoInfo]]
     others: list[PhotoInfo]  # not documents (or removed by the user)
     custom_names: dict = field(default_factory=dict)  # first page path -> name typed by the user
+    excluded: set = field(default_factory=set)        # first page paths of documents not to save
+    history: list = field(default_factory=list, repr=False)
 
     @classmethod
     def from_scan(cls, photos: list[PhotoInfo], gap_seconds: int) -> "Plan":
@@ -322,7 +355,61 @@ class Plan:
         others = [p for p in photos if not p.is_document]
         # Near-misses first so the user sees likely mistakes at the top.
         others.sort(key=lambda p: -p.words)
-        return cls(groups, others)
+        plan = cls(groups, others)
+        # Documents saved in an earlier session start unticked: no duplicates by default.
+        plan.excluded = {g[0].path for g in groups if all(p.saved_as for p in g)}
+        return plan
+
+    # -- undo ---------------------------------------------------------------
+
+    def checkpoint(self) -> None:
+        """Remember the current state; call before every edit."""
+        snap = ([[(p, p.rotation, p.thumb) for p in g] for g in self.groups],
+                [(p, p.rotation, p.thumb) for p in self.others],
+                dict(self.custom_names), set(self.excluded))
+        self.history.append(snap)
+        del self.history[:-50]
+
+    def can_undo(self) -> bool:
+        return bool(self.history)
+
+    def undo(self) -> None:
+        if not self.history:
+            return
+        groups, others, names, excluded = self.history.pop()
+
+        def back(items):
+            out = []
+            for p, rot, thumb in items:
+                p.rotation, p.thumb = rot, thumb
+                out.append(p)
+            return out
+
+        self.groups = [back(g) for g in groups]
+        self.others = back(others)
+        self.custom_names, self.excluded = names, excluded
+
+    # -- which documents get saved -------------------------------------------
+
+    def is_saved(self, g: int) -> bool:
+        return all(p.saved_as for p in self.groups[g])
+
+    def is_included(self, g: int) -> bool:
+        return self.groups[g][0].path not in self.excluded
+
+    def set_included(self, g: int, include: bool) -> None:
+        key = self.groups[g][0].path
+        (self.excluded.discard if include else self.excluded.add)(key)
+
+    def included_indices(self) -> list[int]:
+        return [g for g in range(len(self.groups)) if self.is_included(g)]
+
+    def mark_saved(self, g: int, pdf: Path) -> None:
+        for p in self.groups[g]:
+            p.saved_as = pdf
+        self.excluded.add(self.groups[g][0].path)
+
+    # -- edits ----------------------------------------------------------------
 
     def split(self, g: int, i: int) -> None:
         """Start a new document at page i of group g."""
@@ -335,6 +422,7 @@ class Plan:
 
     def join_previous(self, g: int) -> None:
         if g > 0:
+            self.excluded.discard(self.groups[g][0].path)
             self.groups[g - 1].extend(self.groups.pop(g))
 
     def remove(self, g: int, i: int) -> None:
@@ -371,14 +459,25 @@ class Plan:
             idx += 1
         self.groups.insert(idx, [ph])
 
+    # -- names and folders ----------------------------------------------------
+
+    def fields(self, g: int) -> DocFields:
+        return merge([p.fields for p in self.groups[g] if p.fields])
+
     def suggested_name(self, g: int) -> str:
         grp = self.groups[g]
         width = max(2, len(str(len(self.groups))))
         t = grp[0].taken
         pages = f"{len(grp)} page" + ("s" if len(grp) != 1 else "")
         fallback = f"Document {g + 1:0{width}d} - {t:%Y-%m-%d %H.%M} ({pages}).pdf"
-        fields = merge([p.fields for p in grp if p.fields])
-        return suggest_name(fields, fallback)
+        return suggest_name(self.fields(g), fallback)
+
+    def folder_for(self, g: int, organize: str) -> str:
+        """Subfolder (possibly empty) a document goes into for the chosen organize mode."""
+        f = self.fields(g)
+        year = str(f.date.year) if f.date else (str(f.year) if f.year else "Undated")
+        sender = sanitize(f.sender) if f.sender else "Other"
+        return {"year": year, "sender": sender, "sender_year": f"{sender}/{year}"}.get(organize, "")
 
     def output_names(self) -> list[str]:
         """Final names: user's edit, else content-based suggestion, else dated fallback. Unique."""
@@ -389,3 +488,9 @@ class Plan:
             seen[name.lower()] = n + 1
             names.append(name if n == 0 else f"{stem} ({n + 1}).pdf")
         return names
+
+    def output_paths(self, organize: str) -> list[str]:
+        """Relative paths ("2025/name.pdf") for every document."""
+        return [f"{folder}/{name}" if folder else name
+                for folder, name in ((self.folder_for(g, organize), n)
+                                     for g, n in enumerate(self.output_names()))]
