@@ -213,7 +213,10 @@ def _measure(path, im, taken, tess, settings, opts, screenshot, ft, cls) -> Phot
         feat = {"words": words, "quad": quad, "card_shape": card_shape, "screenshot": screenshot,
                 "aspect": ft.page_aspect(im), "ink": ft.ink_density(gray), "sharpness": ft.sharpness(im)}
         feat.update(ft.ocr_stats(tsv))
-        feat.update(ft.find_codes(im))
+        # Codes only change the decision together with ticket words, so only look for them then.
+        from photo2pdf.naming import is_ticket_text
+
+        feat.update(ft.find_codes(im) if is_ticket_text(text) else {"qr": False, "barcode": False})
         decision = cls.classify(feat, text, settings.min_words)
         info = PhotoInfo(path=path, taken=taken, words=words, card_shape=card_shape,
                          kind=decision.kind or "page", is_document=decision.is_document,

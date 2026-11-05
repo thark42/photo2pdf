@@ -29,6 +29,11 @@ def logenv(tmp_path, monkeypatch):
     for h in root.handlers[:]:
         h.close()
         root.removeHandler(h)
+    # diag.setup() points native-crash tracebacks at crash.log; give them back to stderr so a
+    # crash later in the test run is visible in CI output.
+    import faulthandler
+    import sys
+    faulthandler.enable(file=sys.stderr, all_threads=True)
     for h in saved:
         root.addHandler(h)
 

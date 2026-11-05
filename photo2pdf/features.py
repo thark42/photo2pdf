@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -112,8 +113,20 @@ def minhash_similarity(a: list[int], b: list[int]) -> float:
     return sum(x == y for x, y in zip(a, b)) / len(a)
 
 
+_codes_lock = threading.Lock()
+
+
 def find_codes(rgb) -> dict:
-    """Whether a QR code or a 1D barcode is visible (positions/contents are not kept)."""
+    """Whether a QR code or a 1D barcode is visible (positions/contents are not kept).
+
+    Serialised: OpenCV's QR/barcode detectors are not used concurrently from
+    the scan's worker threads (a native crash was seen on Windows CI when they were).
+    """
+    with _codes_lock:
+        return _find_codes(rgb)
+
+
+def _find_codes(rgb) -> dict:
     import cv2
 
     a = np.asarray(rgb.convert("RGB"))
