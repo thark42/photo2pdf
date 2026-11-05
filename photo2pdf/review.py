@@ -283,7 +283,7 @@ class ScanWindow:
     def _thumb(self, info):
         from PIL import ImageTk
 
-        if info.thumb is None:
+        if info.get_thumb() is None:
             return None
         key = id(info.thumb)
         img = self.photos.get(key)

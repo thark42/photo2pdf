@@ -62,6 +62,18 @@ class PhotoInfo:
     saved_as: Optional[Path] = None       # PDF this photo already went into (registry)
     error: Optional[str] = None
     thumb: Optional[object] = field(default=None, repr=False, compare=False)  # PIL.Image
+    thumb_jpeg: Optional[bytes] = field(default=None, repr=False, compare=False)
+
+    def get_thumb(self):
+        """The thumbnail image, decoding the compact copy kept for non-documents on first use."""
+        if self.thumb is None and self.thumb_jpeg:
+            import io
+
+            from PIL import Image
+
+            self.thumb = Image.open(io.BytesIO(self.thumb_jpeg))
+            self.thumb.load()
+        return self.thumb
 
 
 @dataclass
@@ -150,7 +162,15 @@ def _analyse(path: Path, tess: Tesseract, settings: ScanSettings, opts: Options,
         thumb = rotate_cw(im, info.rotation) if info.is_document else im
         thumb = thumb.copy()
         thumb.thumbnail((THUMB_SIZE, THUMB_SIZE))
-        info.thumb = thumb
+        if info.is_document:
+            info.thumb = thumb
+        else:
+            # Non-documents can be thousands of holiday photos: keep ~5 KB JPEG, not ~50 KB pixels.
+            import io
+
+            buf = io.BytesIO()
+            thumb.convert("RGB").save(buf, "JPEG", quality=70)
+            info.thumb_jpeg = buf.getvalue()
         return info
     except Exception as exc:  # noqa: BLE001
         logging.exception("scan failed for %s", path.name)
@@ -167,7 +187,8 @@ def _fallback_time(path: Path) -> datetime:
         return datetime.fromtimestamp(0)
 
 
-_SKIP_DIRS = {"appdata", "$recycle.bin", "system volume information", "node_modules"}
+_SKIP_DIRS = {"appdata", "$recycle.bin", "system volume information", "node_modules",
+              "windows", "program files", "program files (x86)", "programdata"}
 
 
 def _walk(folder: Path):
@@ -455,7 +476,7 @@ class Plan:
     def rotate(self, g: int, i: int, degrees_cw: int) -> None:
         ph = self.groups[g][i]
         ph.rotation = (ph.rotation + degrees_cw) % 360
-        if ph.thumb is not None:
+        if ph.get_thumb() is not None:
             ph.thumb = rotate_cw(ph.thumb, degrees_cw)
 
     def set_name(self, g: int, name: str) -> None:

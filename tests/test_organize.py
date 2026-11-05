@@ -167,3 +167,26 @@ def test_rescan_after_save_shows_documents_as_saved_not_new(tmp_path):
 
     again = Plan.from_scan(scan_paths([folder], settings, _tess(), opts=Options()), 180)
     assert again.is_saved(0) and again.included_indices() == []   # nothing to save twice
+
+
+def test_non_document_thumbs_are_compact_and_decode_on_demand():
+    import io
+    p = PhotoInfo(Path("cat.jpg"), T0, words=0, is_document=False)
+    buf = io.BytesIO()
+    Image.new("RGB", (160, 120), "orange").save(buf, "JPEG")
+    p.thumb_jpeg = buf.getvalue()
+    assert p.thumb is None
+    assert p.get_thumb().size == (160, 120)
+    plan = Plan.from_scan([p], 180)
+    plan.add(0)
+    plan.rotate(0, 0, 90)          # promoted photo can be turned
+    assert plan.groups[0][0].thumb.size == (120, 160)
+
+
+def test_walk_skips_hidden_and_system_folders(tmp_path):
+    from photo2pdf.detect import list_folder
+    for d in ("ok", ".hidden", "AppData", "Windows", "$Recycle.Bin", "ok/deeper"):
+        (tmp_path / d).mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (5, 5)).save(tmp_path / d / "a.jpg")
+    got = sorted(str(p.relative_to(tmp_path)).replace("\\", "/") for p in list_folder(tmp_path, True))
+    assert got == ["ok/a.jpg", "ok/deeper/a.jpg"]
