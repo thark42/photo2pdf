@@ -33,7 +33,7 @@ def logenv(tmp_path, monkeypatch):
     # crash later in the test run is visible in CI output.
     import faulthandler
     import sys
-    faulthandler.enable(file=sys.stderr, all_threads=True)
+    faulthandler.enable(file=sys.__stderr__, all_threads=True)
     for h in saved:
         root.addHandler(h)
 
