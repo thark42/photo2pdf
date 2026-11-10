@@ -628,14 +628,33 @@ def selftest(out_pdf: Path) -> int:
     warped = cv2.warpPerspective(src, m, (W, H))
     mask = cv2.warpPerspective(np.full((1754, 1240), 255, np.uint8), m, (W, H))
     shot = np.where(mask[..., None] > 0, warped, bg).astype(np.uint8)
+    # Saved the way an iPhone does: HEIC, pixels stored sideways with an orientation tag,
+    # capture time only in EXIF. Checks the bundled HEIC decoder in the built app.
+    from datetime import datetime
+
+    exif = Image.Exif()
+    exif[0x0112] = 6                                   # display = stored rotated 90 deg clockwise
+    exif[0x0132] = "2025:03:15 10:15:00"
+    exif.get_ifd(0x8769)[0x9003] = "2025:03:15 10:15:00"
     with tempfile.TemporaryDirectory() as td:
         folder = Path(td)
-        Image.fromarray(shot).save(folder / "IMG_20250315_101500.jpg")
+        try:
+            import pillow_heif
+
+            pillow_heif.register_heif_opener()
+            Image.fromarray(shot).rotate(90, expand=True).save(
+                folder / "IMG_0001.HEIC", format="HEIF", exif=exif.tobytes(), quality=90)
+        except Exception as exc:  # noqa: BLE001
+            print(f"heic: cannot write test file: {exc!r}")
+            return 1
         infos = scan_folder(folder, ScanSettings(workers=1), tess, use_cache=False)
         plan = Plan.from_scan(infos, 180)
         names = plan.output_names()
-        print(f"letter: doc={infos[0].is_document} rotation={infos[0].rotation} names={names}")
+        print(f"letter (HEIC): doc={infos[0].is_document} rotation={infos[0].rotation} "
+              f"taken={infos[0].taken} error={infos[0].error} names={names}")
         if names != ["2025-03-14 Belastingdienst - Voorlopige aanslag inkomstenbelasting 2025.pdf"]:
+            return 1
+        if infos[0].taken != datetime(2025, 3, 15, 10, 15):
             return 1
 
     # Card: insurance card photographed at an angle -> card kind, card folder, real-size name.

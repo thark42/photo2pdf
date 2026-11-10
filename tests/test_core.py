@@ -168,6 +168,33 @@ def test_heic_input(tmp_path):
     assert len(res.outputs) == 1 and not res.warnings
 
 
+def test_iphone_style_heic_orientation_and_capture_time(tmp_path):
+    """iPhones store HEIC pixels sideways plus an orientation tag, and the capture time only
+    in EXIF. The page must come out the way it was held, with the EXIF time."""
+    pillow_heif = pytest.importorskip("pillow_heif")
+    pillow_heif.register_heif_opener()
+    from photo2pdf.core import _open_image, load_page
+    from photo2pdf.detect import _exif_time
+
+    portrait = Image.new("RGB", (600, 900), "white")
+    ImageDraw.Draw(portrait).rectangle([0, 0, 599, 99], fill="black")   # marks the top edge
+    exif = Image.Exif()
+    exif[0x0112] = 6
+    exif.get_ifd(0x8769)[0x9003] = "2024:06:01 09:30:00"
+    src = tmp_path / "IMG_4821.HEIC"
+    try:
+        portrait.rotate(90, expand=True).save(src, format="HEIF", exif=exif.tobytes(), quality=95)
+    except Exception as exc:  # encoder may be missing on some builds
+        pytest.skip(f"no HEIF encoder: {exc}")
+
+    with _open_image(src) as raw:
+        assert _exif_time(raw) == datetime(2024, 6, 1, 9, 30)
+    im = load_page(src, Options(straighten=False), max_edge=2000)
+    assert im.size == (600, 900)                       # portrait, as held
+    top = im.convert("L").crop((0, 0, 600, 80))
+    assert max(top.getdata()) < 80                     # black band is at the top, not rotated twice
+
+
 def test_tesseract_output_is_decoded_as_utf8(monkeypatch):
     """Windows otherwise decodes with cp1252 and loses the whole output on bytes like 0x9d."""
     import subprocess as sp
