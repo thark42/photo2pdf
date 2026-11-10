@@ -460,9 +460,11 @@ Builds run in CI only: [`.github/workflows/build.yml`](.github/workflows/build.y
 6. Install silently, check the Send-To shortcut exists, then run
    `--selftest` on the installed copy.
 7. Upload two artifacts: `PhotosToPDF-Setup-<ver>` and `PhotosToPDF-portable-<ver>`.
-8. On a pushed tag `v<ver>` (must equal `photo2pdf.__version__`), publish a
-   GitHub Release with the installer and a portable zip attached, using
-   [`RELEASE_NOTES.md`](RELEASE_NOTES.md) as the text.
+8. Publish a GitHub Release `v<ver>` (`<ver>` = `photo2pdf.__version__`) with
+   the installer and a portable zip attached, using
+   [`RELEASE_NOTES.md`](RELEASE_NOTES.md) as the text. This runs on a pushed
+   tag `v<ver>`, or when the workflow is run by hand on `main` with
+   "release" ticked (Actions → build → Run workflow); the tag is then created.
 
 ## Develop / test on Linux
 

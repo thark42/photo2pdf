@@ -13,8 +13,10 @@
 name: build
 
 #
-# Pushing a tag "v<version>" (matching photo2pdf/__init__.py) also publishes a
-# GitHub Release with the installer and the portable zip attached.
+# Publishing a release: either push a tag "v<version>" (matching
+# photo2pdf/__init__.py), or run this workflow by hand on main with
+# "release" ticked. Both publish a GitHub Release (creating the tag if needed)
+# with the installer and the portable zip attached.
 
 on:
   push:
@@ -22,6 +24,11 @@ on:
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      release:
+        description: "Publish a GitHub Release for the version in photo2pdf/__init__.py"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -166,7 +173,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release && github.ref == 'refs/heads/main')
     runs-on: ubuntu-24.04
     needs: build-windows
     permissions:
@@ -179,7 +186,9 @@ jobs:
       - name: Check tag matches app version
         run: |
           v=$(python3 -c "import sys; sys.path.insert(0, '.'); import photo2pdf; print(photo2pdf.__version__)")
-          test "${GITHUB_REF_NAME}" = "v$v" || { echo "tag ${GITHUB_REF_NAME} != v$v"; exit 1; }
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            test "${GITHUB_REF_NAME}" = "v$v" || { echo "tag ${GITHUB_REF_NAME} != v$v"; exit 1; }
+          fi
           echo "APP_VERSION=$v" >> "$GITHUB_ENV"
       - name: Publish release
         env:
@@ -187,7 +196,7 @@ jobs:
         run: |
           cd artifacts
           (cd "PhotosToPDF-portable-$APP_VERSION" && zip -qr "../PhotosToPDF-portable-$APP_VERSION.zip" .)
-          gh release create "$GITHUB_REF_NAME" \
+          gh release create "v$APP_VERSION" --target "$GITHUB_SHA" \
             "PhotosToPDF-Setup-$APP_VERSION/PhotosToPDF-Setup-$APP_VERSION.exe" \
             "PhotosToPDF-portable-$APP_VERSION.zip" \
-            --repo "$GITHUB_REPOSITORY" --title "Photos to PDF $APP_VERSION" --notes-file RELEASE_NOTES.md
+            --repo "$GITHUB_REPOSITORY" --title "Photos to PDF $APP_VERSION" --notes-file ../RELEASE_NOTES.md
