@@ -23,7 +23,7 @@ from photo2pdf.detect import ORGANIZE_CHOICES, Plan, ScanSettings, scan_paths
 COLUMNS = 6
 DOCS_PER_PAGE = 12
 OTHERS_PER_PAGE = 36
-THUMB_DISPLAY = 130  # px at 96 dpi
+THUMB_SIZES = {"Small": 130, "Medium": 220, "Large": 380}   # longest side, px at 96 dpi
 
 TAB_NEW, TAB_SAVED, TAB_OTHER = "new", "saved", "other"
 
@@ -42,7 +42,8 @@ class ScanWindow:
         self.plan: Plan | None = None
         self.cancel = threading.Event()
         self.events: queue.Queue = queue.Queue()
-        self.photos: dict[int, object] = {}   # id(PIL thumb) -> PhotoImage (fresh after rotate)
+        self.photos: dict[tuple, object] = {}   # (id(info), rotation, px) -> PhotoImage
+        self.page_labels: dict[tuple, object] = {}  # (group, page) -> thumbnail Label on screen
         self.busy = False
         self.unsaved_edits = False
         self.saved_this_session = 0
@@ -126,6 +127,16 @@ class ScanWindow:
                                  command=self.undo, state="disabled")
         self.b_undo.pack(side="left")
         ui.Tooltip(self.b_undo, "Undo the last change (Ctrl+Z)")
+        ttk.Label(row2, text="     Picture size:").pack(side="left")
+        if self.opts.thumb_size not in THUMB_SIZES:
+            self.opts.thumb_size = "Medium"
+        self.v_thumb = tk.StringVar(value=self.opts.thumb_size)
+        size = ttk.Combobox(row2, textvariable=self.v_thumb, state="readonly", width=8,
+                            values=list(THUMB_SIZES))
+        size.pack(side="left", padx=4)
+        size.bind("<<ComboboxSelected>>", self._thumb_size_changed)
+        ui.Tooltip(size, "Make the page pictures bigger to compare text and sharpness. "
+                         "Click a page to see it full size.")
         self.b_close = ttk.Button(row2, text="Stop", command=self._stop)
         self.b_close.pack(side="right")
         self.b_save = ttk.Button(row2, text="Save", command=self.save, state="disabled")
@@ -287,22 +298,52 @@ class ScanWindow:
         """How many thumbnails fit side by side in the visible width."""
         self.canvas.update_idletasks()
         width = max(self.canvas.winfo_width(), int(600 * self.s))
-        return max(2, width // int((THUMB_DISPLAY + 46) * self.s))
+        return max(1, width // int((THUMB_SIZES[self.opts.thumb_size] + 46) * self.s))
 
     def _thumb(self, info):
         from PIL import ImageTk
 
-        if info.get_thumb() is None:
-            return None
-        key = id(info.thumb)
+        px = int(THUMB_SIZES[self.opts.thumb_size] * self.s)
+        key = (id(info), info.rotation, px)
         img = self.photos.get(key)
         if img is None:
-            t = info.thumb.copy()
-            target = int(THUMB_DISPLAY * self.s)
-            t.thumbnail((target, target))
+            t = info.display_thumb()
+            if t is None:
+                return None
+            t = t.copy()
+            t.thumbnail((px, px))
             img = ImageTk.PhotoImage(t, master=self.win)
+            info.drop_decoded_thumb()      # the PhotoImage is what's kept while on screen
+            if len(self.photos) > 400:
+                self.photos.clear()
             self.photos[key] = img
         return img
+
+    def _thumb_size_changed(self, _e=None):
+        self.opts.thumb_size = self.v_thumb.get()
+        from photo2pdf.app import save_options
+
+        save_options(self.opts)
+        logging.info("thumbnail size -> %s", self.opts.thumb_size)
+        self.photos.clear()
+        self._commit_names()
+        self.redraw()
+
+    def _rotate(self, g, i, deg):
+        """Turn one page and update only its picture: redrawing everything jumps the view."""
+        if self.busy or self.plan is None:
+            return
+        self._commit_names()
+        self._log_edit("rotate", (g, i, deg))
+        self.plan.checkpoint()
+        self.plan.rotate(g, i, deg)
+        self.unsaved_edits = True
+        self.b_undo.configure(state="normal")
+        lbl = self.page_labels.get((g, i))
+        if lbl is not None and lbl.winfo_exists():
+            lbl.configure(image=self._thumb(self.plan.groups[g][i]))
+        else:
+            self.redraw()
 
     def _organize(self) -> str:
         label = self.v_org.get()
@@ -315,6 +356,7 @@ class ScanWindow:
             return
         for w in self.inner.winfo_children():
             w.destroy()
+        self.page_labels = {}
         self._build_tabs()
         n_new = len(self._tab_items(TAB_NEW))
         n_inc = len(plan.included_indices())
@@ -433,6 +475,7 @@ class ScanWindow:
         lbl = tk.Label(cell, image=img, text="(can't show)" if img is None else "", bg="#ffffff",
                        cursor="hand2", relief="solid", bd=1)
         lbl.pack()
+        self.page_labels[(g, i)] = lbl
         lbl.bind("<Button-1>", lambda e: self._preview(g, i))
         lbl.bind("<Button-3>", lambda e: self._page_menu(e, g, i))
         ui.Tooltip(lbl, "Click to see this page large. Right-click for more.")
@@ -443,8 +486,8 @@ class ScanWindow:
             b = ttk.Button(tools, image=ui.icon(self.win, name, 16), width=2, command=fn)
             b.pack(side="left", padx=1)
             ui.Tooltip(b, tip)
-        tool("rot_left", "Turn left", lambda: self._edit(plan.rotate, g, i, 270))
-        tool("rot_right", "Turn right", lambda: self._edit(plan.rotate, g, i, 90))
+        tool("rot_left", "Turn left", lambda: self._rotate(g, i, 270))
+        tool("rot_right", "Turn right", lambda: self._rotate(g, i, 90))
         if i > 0:
             tool("split", "Start a new document from this page", lambda: self._edit(plan.split, g, i))
         tool("remove", "Remove this page from the document", lambda: self._edit(plan.remove, g, i))
@@ -552,9 +595,9 @@ class ScanWindow:
         m = self.tk.Menu(self.win, tearoff=0)
         m.add_command(label="See this page large", command=lambda: self._preview(g, i))
         m.add_separator()
-        m.add_command(label="Turn right", command=lambda: self._edit(plan.rotate, g, i, 90))
-        m.add_command(label="Turn left", command=lambda: self._edit(plan.rotate, g, i, 270))
-        m.add_command(label="Turn upside down", command=lambda: self._edit(plan.rotate, g, i, 180))
+        m.add_command(label="Turn right", command=lambda: self._rotate(g, i, 90))
+        m.add_command(label="Turn left", command=lambda: self._rotate(g, i, 270))
+        m.add_command(label="Turn upside down", command=lambda: self._rotate(g, i, 180))
         m.add_separator()
         if i > 0:
             m.add_command(label="Move left", command=lambda: self._edit(plan.move, g, i, -1))
@@ -816,7 +859,7 @@ class Preview:
         self.label.configure(image=self.img, text="")
 
     def rotate(self, deg):
-        self.sw._edit(self.sw.plan.rotate, self.g, self.i, deg)
+        self.sw._rotate(self.g, self.i, deg)
         self.render()
 
     def step(self, d):

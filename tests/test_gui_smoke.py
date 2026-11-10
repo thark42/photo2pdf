@@ -66,10 +66,23 @@ def test_review_window_edit_undo_page_and_close(app, monkeypatch, tmp_path):
     # Untick one document
     sw._edit(sw.plan.set_included, 0, False)
     assert sw.b_save.cget("text") == "Save 29 PDFs"
-    # Rotating changes the displayed thumbnail (PhotoImage cache keyed by thumb object)
-    before = sw._thumb(sw.plan.groups[1][0])
-    sw._edit(sw.plan.rotate, 1, 0, 90)
-    assert sw._thumb(sw.plan.groups[1][0]) is not before
+    # Turning a page swaps only that picture: no other widget is rebuilt, the view doesn't jump.
+    sw._set_page(0)
+    lbl = sw.page_labels[(1, 0)]
+    cards = sw.inner.winfo_children()
+    before = str(lbl.cget("image"))
+    sw._rotate(1, 0, 90)
+    assert sw.page_labels[(1, 0)] is lbl and lbl.winfo_exists()
+    assert sw.inner.winfo_children() == cards
+    assert str(lbl.cget("image")) != before
+    assert sw.plan.groups[1][0].rotation == 90 and str(sw.b_undo.cget("state")) == "normal"
+    # Bigger pictures on request (persisted), fewer per row.
+    cols_medium = sw._columns()
+    sw.v_thumb.set("Large")
+    sw._thumb_size_changed()
+    assert app.opts.thumb_size == "Large" and sw._columns() <= cols_medium
+    sw.v_thumb.set("Medium")
+    sw._thumb_size_changed()
     # Tabs
     sw._set_tab(review.TAB_OTHER)
     sw._set_tab(review.TAB_SAVED)

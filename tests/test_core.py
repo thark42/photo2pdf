@@ -192,7 +192,7 @@ def test_iphone_style_heic_orientation_and_capture_time(tmp_path):
     im = load_page(src, Options(straighten=False), max_edge=2000)
     assert im.size == (600, 900)                       # portrait, as held
     top = im.convert("L").crop((0, 0, 600, 80))
-    assert max(top.getdata()) < 80                     # black band is at the top, not rotated twice
+    assert top.getextrema()[1] < 80                    # black band is at the top, not rotated twice
 
 
 def test_tesseract_output_is_decoded_as_utf8(monkeypatch):

@@ -58,6 +58,7 @@ class Options:
     organize: str = "year"        # folder mode: subfolders "none" | "year" | "sender" | "sender_year"
     max_long_edge: int = 3508     # px; 3508 = A4 long edge at 300 dpi
     jpeg_quality: int = 85
+    thumb_size: str = "Medium"    # review screen: "Small" | "Medium" | "Large"
 
 
 @dataclass

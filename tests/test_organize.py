@@ -180,7 +180,8 @@ def test_non_document_thumbs_are_compact_and_decode_on_demand():
     plan = Plan.from_scan([p], 180)
     plan.add(0)
     plan.rotate(0, 0, 90)          # promoted photo can be turned
-    assert plan.groups[0][0].thumb.size == (120, 160)
+    assert plan.groups[0][0].display_thumb().size == (120, 160)
+    assert plan.groups[0][0].get_thumb().size == (160, 120)   # stored copy untouched
 
 
 def test_walk_skips_hidden_and_system_folders(tmp_path):

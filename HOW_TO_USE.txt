@@ -8,6 +8,22 @@ Everything happens on this computer. Nothing is uploaded, it works
 without internet, and your photos are never moved, changed or deleted.
 
 
+FIRST: PHOTOS THAT ARE STILL ON YOUR IPHONE
+-------------------------------------------
+
+The app can't read photos straight from a phone, and dragging them from
+the phone doesn't work. Copy them onto the computer first:
+
+1. Connect the iPhone with its cable and unlock it. If it asks "Trust
+   this computer?", tap Trust.
+2. Open File Explorer. Under "This PC" click Apple iPhone > Internal
+   Storage > DCIM.
+3. Select all the folders there and press Ctrl+C. Open your Pictures
+   folder, make a new folder (for example "iPhone photos") and press
+   Ctrl+V inside it. Many photos can take a while.
+4. Use that new folder below. Nothing is removed from the phone.
+
+
 THE MAIN THING: ORGANIZE A FOLDER OF PHOTOS
 -------------------------------------------
 
@@ -100,7 +116,12 @@ TIPS
 - Straightening works best when all four corners of the page are in the
   photo and the page stands out from what it's lying on. Curved pages
   (open books) and folded pages are not flattened.
-- iPhone photos (.HEIC) work as they are.
+- iPhone photos (.HEIC) work as they are, once copied to the computer.
+- For pages to come out straight and the right way up, photograph each
+  page on a plain, darker surface with all four corners visible, and keep
+  other papers out of the picture.
+- The "Picture size" box at the bottom of the check screen makes the page
+  pictures bigger, to compare sharpness and text.
 - If a name is wrong, just type a better one before pressing Save.
 
 

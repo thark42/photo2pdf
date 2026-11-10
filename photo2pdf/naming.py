@@ -710,3 +710,44 @@ def suggest_kind_name(f: DocFields, fallback: str) -> str:
     if len(parts) == 1 and f.kind not in ("label",):
         return fallback.replace("Document", f.doc_type, 1)
     return sanitize(" - ".join(parts)) + ".pdf"
+
+
+# ==========================================================================
+# Page numbers: "Pagina 2 van 3", "Page 5 of 17", "blad 2/4", a footer "3/5" or "- 2 -"
+# ==========================================================================
+
+_PAGE_WORD = r"(?:pagina|page|pag\.?|blad|blz\.?|p\.)"
+_PAGE_OF = re.compile(rf"\b{_PAGE_WORD}\s*(\d{{1,3}})\s*(?:van|of|/|uit)\s*(\d{{1,3}})\b", re.I)
+_BARE_OF = re.compile(r"^\W*(\d{1,3})\s*(?:/|van|of)\s*(\d{1,3})\W*$", re.I)
+_PAGE_ONLY = re.compile(rf"^\W*{_PAGE_WORD}\s*(\d{{1,3}})\W*$", re.I)
+_DASHED = re.compile(r"^\s*[-–—]\s*(\d{1,3})\s*[-–—]\s*$")
+
+
+def page_number(text: str) -> Optional[tuple[int, Optional[int]]]:
+    """(page, total or None) printed on the page, or None.
+
+    Header and footer lines are tried first, because body text can mention pages
+    of other things. A bare "3/5" or "- 2 -" counts only as a line of its own.
+    """
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    if not lines:
+        return None
+    edge = lines[-6:][::-1] + lines[:6]
+    order = edge + [ln for ln in lines if ln not in edge]
+
+    def ok(n, t):
+        return 1 <= n <= 300 and (t is None or n <= t <= 300)
+
+    for ln in order:
+        m = _PAGE_OF.search(ln)
+        if m and ok(int(m[1]), int(m[2])):
+            return int(m[1]), int(m[2])
+    for ln in edge:
+        m = _BARE_OF.match(ln)
+        if m and ok(int(m[1]), int(m[2])) and int(m[2]) > 1:
+            return int(m[1]), int(m[2])
+    for ln in edge:
+        m = _PAGE_ONLY.match(ln) or _DASHED.match(ln)
+        if m and ok(int(m[1]), None):
+            return int(m[1]), None
+    return None

@@ -91,7 +91,16 @@ call can be fixed before saving.
   - Photos are put in time order, using EXIF `DateTimeOriginal`, then a
     timestamp in the file name (IMG_/PXL_/Screenshot_/WhatsApp patterns),
     then the file's modified time.
-  - A new document starts when:
+  - **Printed page numbers decide first** ("Pagina 2 van 3", "Page 5 of 17",
+    "blad 2/4", a footer line "3/5" or "- 2 -"; header and footer lines are
+    read first). Page n+1 straight after page n joins the document even
+    after a pause of up to 2 hours, a photo of something else in between,
+    or a different date in the text. "Page 1", a restarted count, a
+    different page total, or a finished document (n of n) starts a new one.
+    A non-document photo that shows "page n of m" is treated as a page.
+  - Photos set aside as duplicates are skipped, so a retaken page never cuts
+    its letter in two.
+  - Otherwise a new document starts when:
     - the gap between photos exceeds 180 s
     - a non-document photo sits in between
     - the subfolder changes
@@ -170,12 +179,18 @@ Each photo is measured once:
 | Blurred sheet | sheet found but sharpness < 60 | kept as a page, flagged "hard to read" | |
 | Handwritten note / whiteboard | sheet found, ink 1–20%, little printed text | `Notes/<year>` | `Note - <photo date>` (handwriting isn't readable by Tesseract, so these aren't searchable) |
 
-**Duplicates.** Document photos of the same thing are grouped. Two photos
-are duplicates when:
-- their image fingerprints differ by 40 bits or fewer out of 256, and
-- where both have text, their text fingerprints match at least 60%
+**Duplicates.** Document photos of the same thing are grouped. A photo is
+a second copy when:
+- its image fingerprint differs by 40 bits or fewer out of 256, and, where
+  both have text, the text fingerprints match at least 60%; or, taken
+  within 15 minutes of the other photo,
+- the text fingerprints match at least 70% although the picture differs
+  (retaken from another angle), or
+- it shows the same printed page number and page count of the same letter
+  (a blurred first try and its retake).
 
-The text check keeps two pages of the same form apart. The copy with more
+Different printed page numbers are never duplicates, which keeps two pages
+of the same form apart. The copy with more
 readable words, then the sharper one, is kept. The rest go under "Not
 documents" as "Duplicate of …" and can be added back. Nothing is deleted.
 

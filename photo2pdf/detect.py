@@ -47,8 +47,9 @@ from photo2pdf.core import (
 from photo2pdf.naming import DocFields, merge, sanitize, suggest_name, text_from_tsv
 
 DETECT_LONG_EDGE = 1600
-THUMB_SIZE = 160
-CACHE_VERSION = 4
+THUMB_SIZE = 520        # documents: big enough for the "Large" thumbnail view
+THUMB_SIZE_OTHER = 320  # non-documents (can be thousands of holiday photos)
+CACHE_VERSION = 5
 CARD_BACK_SECONDS = 120   # a low-text card photo this soon after a card is taken as its back
 
 
@@ -69,12 +70,17 @@ class PhotoInfo:
     sharpness: float = 0.0
     dhash: Optional[int] = None           # image fingerprint (upright page)
     minhash: list = field(default_factory=list)  # text fingerprint (not reversible to the text)
+    page_no: Optional[int] = None         # printed page number ("Pagina 2 van 3" -> 2)
+    page_total: Optional[int] = None      # printed page count (-> 3), if given
+    duplicate_of: Optional[Path] = None   # set aside as a second copy of this photo
     error: Optional[str] = None
     thumb: Optional[object] = field(default=None, repr=False, compare=False)  # PIL.Image
     thumb_jpeg: Optional[bytes] = field(default=None, repr=False, compare=False)
+    thumb_rotation: int = 0   # rotation already applied to the stored thumbnail
 
     def get_thumb(self):
-        """The thumbnail image, decoding the compact copy kept for non-documents on first use."""
+        """The thumbnail as it was made (turned by `thumb_rotation`), decoded from the compact
+        JPEG copy on first use."""
         if self.thumb is None and self.thumb_jpeg:
             import io
 
@@ -83,6 +89,20 @@ class PhotoInfo:
             self.thumb = Image.open(io.BytesIO(self.thumb_jpeg))
             self.thumb.load()
         return self.thumb
+
+    def display_thumb(self):
+        """The thumbnail turned to the page's current rotation (edits never touch the stored copy)."""
+        t = self.get_thumb()
+        if t is None:
+            return None
+        from photo2pdf.core import rotate_cw
+
+        return rotate_cw(t, (self.rotation - self.thumb_rotation) % 360)
+
+    def drop_decoded_thumb(self) -> None:
+        """Free the decoded thumbnail; the JPEG copy stays."""
+        if self.thumb_jpeg:
+            self.thumb = None
 
 
 @dataclass
@@ -159,27 +179,28 @@ def _analyse(path: Path, tess: Tesseract, settings: ScanSettings, opts: Options,
                              is_document=cached.get("is_document", False), reason=cached.get("reason"),
                              hard_to_read=cached.get("hard", False), dhash=cached.get("dhash"),
                              minhash=cached.get("minhash") or [], sharpness=cached.get("sharpness", 0.0),
-                             screenshot=cached.get("screenshot", False))
+                             screenshot=cached.get("screenshot", False),
+                             page_no=(cached.get("page") or [None, None])[0],
+                             page_total=(cached.get("page") or [None, None])[1])
         else:
             info = _measure(path, im, taken, tess, settings, opts, screenshot, ft, cls)
         logging.info("scan %s: words=%d document=%s kind=%s reason=%s card_shape=%s hard=%s rotation=%d "
-                     "cached=%s taken=%s (%.2fs)", path.name, info.words, info.is_document, info.kind,
-                     info.reason, info.card_shape, info.hard_to_read, info.rotation, cached is not None,
+                     "page=%s/%s cached=%s taken=%s (%.2fs)", path.name, info.words, info.is_document, info.kind,
+                     info.reason, info.card_shape, info.hard_to_read, info.rotation, info.page_no,
+                     info.page_total, cached is not None,
                      info.taken.isoformat(timespec="minutes"), time.perf_counter() - t0)
         if info.fields:
             diag.fields("scan %s fields %s", path.name, info.fields.to_json())
-        thumb = rotate_cw(im, info.rotation) if info.is_document else im
-        thumb = thumb.copy()
-        thumb.thumbnail((THUMB_SIZE, THUMB_SIZE))
-        if info.is_document:
-            info.thumb = thumb
-        else:
-            # Non-documents can be thousands of holiday photos: keep ~5 KB JPEG, not ~50 KB pixels.
-            import io
+        # Kept as JPEG (tens of KB, not ~0.8 MB of pixels) and decoded only while on screen.
+        import io
 
-            buf = io.BytesIO()
-            thumb.convert("RGB").save(buf, "JPEG", quality=70)
-            info.thumb_jpeg = buf.getvalue()
+        info.thumb_rotation = info.rotation if info.is_document else 0
+        thumb = rotate_cw(im, info.thumb_rotation).copy()
+        size = THUMB_SIZE if info.is_document else THUMB_SIZE_OTHER
+        thumb.thumbnail((size, size))
+        buf = io.BytesIO()
+        thumb.convert("RGB").save(buf, "JPEG", quality=82 if info.is_document else 70)
+        info.thumb_jpeg = buf.getvalue()
         return info
     except Exception as exc:  # noqa: BLE001
         logging.exception("scan failed for %s", path.name)
@@ -228,6 +249,16 @@ def _measure(path, im, taken, tess, settings, opts, screenshot, ft, cls) -> Phot
                          kind=decision.kind or "page", is_document=decision.is_document,
                          reason=decision.reason, fields=decision.fields, screenshot=screenshot,
                          sharpness=feat["sharpness"])
+        from photo2pdf.naming import page_number
+
+        pn = None if screenshot else page_number(text)
+        if pn:
+            info.page_no, info.page_total = pn
+            if not info.is_document and pn[1] and words >= 3:
+                # "Pagina 3 van 3" with little else (a signature page, a short last page):
+                # a printed page count is good evidence of a document page.
+                logging.info("promoted %s to document: page %d of %d", path.name, pn[0], pn[1])
+                info.is_document, info.kind, info.reason = True, "page", None
         if decision.is_document:
             if pre_rotation is not None:
                 info.rotation = pre_rotation
@@ -375,7 +406,8 @@ def scan_paths(
                               "card_shape": info.card_shape, "kind": info.kind,
                               "is_document": info.is_document, "reason": info.reason,
                               "hard": info.hard_to_read, "dhash": info.dhash, "minhash": info.minhash,
-                              "sharpness": info.sharpness, "screenshot": info.screenshot}
+                              "sharpness": info.sharpness, "screenshot": info.screenshot,
+                              "page": [info.page_no, info.page_total]}
         return info
 
     progress(0, total, f"Found {total} photos")
@@ -434,68 +466,154 @@ def _new_letterhead(current: list[PhotoInfo], ph: PhotoInfo) -> bool:
                 or (f.date and so_far.date and f.date != so_far.date))
 
 
+PAGE_SEQUENCE_MAX_GAP = 2 * 3600   # seconds; consecutive page numbers join across longer pauses
+
+
+def _continues(prev: PhotoInfo, ph: PhotoInfo) -> bool:
+    """`ph` carries the page number right after `prev`'s, with no conflicting page count."""
+    return (prev.page_no is not None and ph.page_no == prev.page_no + 1
+            and (prev.page_total is None or ph.page_total is None or prev.page_total == ph.page_total))
+
+
+def _page_break(prev: PhotoInfo, ph: PhotoInfo) -> bool:
+    """Printed page numbers say `ph` cannot be the next page of `prev`'s document."""
+    if prev.page_no is not None and prev.page_total and prev.page_no >= prev.page_total:
+        return True                                   # the previous document was complete
+    if ph.page_no is None:
+        return False
+    if ph.page_no == 1:
+        return True
+    if prev.page_no is None:
+        return False
+    if prev.page_total and ph.page_total and prev.page_total != ph.page_total:
+        return True
+    return ph.page_no <= prev.page_no
+
+
 def group_documents(photos: list[PhotoInfo], gap_seconds: int) -> list[list[PhotoInfo]]:
-    """Split time-ordered photos into documents; non-documents and folder changes act as separators."""
+    """Split time-ordered photos into documents.
+
+    A photo set aside as a duplicate is skipped, not treated as a separator: a retaken page
+    must not cut its letter in two. Printed page numbers decide first: page n+1 after page n
+    joins (even after a long pause or with a different date in the text), and "page 1" or a
+    restarted count begins a new document. Without page numbers: time gaps, other
+    non-document photos, folder changes and a new letterhead separate documents.
+    """
     groups: list[list[PhotoInfo]] = []
     current: list[PhotoInfo] = []
     prev: Optional[PhotoInfo] = None
     for ph in photos:
+        if ph.duplicate_of is not None:
+            continue
         if not ph.is_document:
             if current:
                 groups.append(current)
                 current = []
             prev = None
             continue
-        if prev is not None and ((ph.taken - prev.taken).total_seconds() > gap_seconds
-                                 or ph.path.parent != prev.path.parent
-                                 or _new_letterhead(current, ph)):
-            groups.append(current)
-            current = []
+        if prev is not None:
+            gap = (ph.taken - prev.taken).total_seconds()
+            if ph.path.parent != prev.path.parent:
+                split = True
+            elif _continues(prev, ph) and ph.kind == prev.kind and gap <= PAGE_SEQUENCE_MAX_GAP:
+                split = False
+            elif _page_break(prev, ph):
+                split = True
+            else:
+                split = gap > gap_seconds or _new_letterhead(current, ph)
+            if split:
+                groups.append(current)
+                current = []
         current.append(ph)
         prev = ph
     if current:
         groups.append(current)
-    return groups
+    return _join_page_runs(groups)
+
+
+def _join_page_runs(groups: list[list[PhotoInfo]]) -> list[list[PhotoInfo]]:
+    """Put back together a numbered document that something else cut in two, e.g. a photo
+    of something else taken between page 4 and page 5."""
+    out: list[list[PhotoInfo]] = []
+    for g in groups:
+        if out:
+            a = out[-1]
+            last = next((p for p in reversed(a) if p.page_no is not None), None)
+            first = g[0]
+            if (last is not None and _continues(last, first) and first.kind == last.kind
+                    and first.path.parent == last.path.parent
+                    and (first.taken - a[-1].taken).total_seconds() <= PAGE_SEQUENCE_MAX_GAP):
+                logging.info("joined %s to the document before it: page %s follows page %s",
+                             first.path.name, first.page_no, last.page_no)
+                a.extend(g)
+                continue
+        out.append(g)
+    return out
 
 
 DUP_IMAGE_BITS = 40     # of 256 dHash bits; straightened re-shots of one page differ by far less
 DUP_TEXT_SIMILARITY = 0.6
+RETAKE_SECONDS = 15 * 60      # a retake is normally taken within minutes of the first shot
+RETAKE_TEXT_SIMILARITY = 0.7  # same words, whatever the angle: a retake even if the picture differs
+
+
+def _same_page(k: PhotoInfo, p: PhotoInfo) -> Optional[str]:
+    """Why `p` is a second photo of the page `k` shows, or None."""
+    from photo2pdf.features import hamming, minhash_similarity
+
+    if k.kind != p.kind or k.path.parent != p.path.parent:
+        return None
+    if k.page_no is not None and p.page_no is not None and (
+            k.page_no != p.page_no or (k.page_total and p.page_total and k.page_total != p.page_total)):
+        return None                                  # different printed page numbers
+    sim = minhash_similarity(k.minhash, p.minhash) if (k.minhash and p.minhash) else None
+    close = abs((k.taken - p.taken).total_seconds()) <= RETAKE_SECONDS
+    # 1. Near-identical picture, and the words (where both have them) agree.
+    if hamming(k.dhash, p.dhash) <= DUP_IMAGE_BITS and (sim is None or sim >= DUP_TEXT_SIMILARITY):
+        if sim is not None or not ((k.words >= 4 or p.words >= 4) and not (k.hard_to_read or p.hard_to_read)):
+            return "same picture"
+    if not close:
+        return None
+    # 2. Retaken from another angle or after a blurred first try: the picture differs, the text doesn't.
+    if sim is not None and sim >= RETAKE_TEXT_SIMILARITY:
+        return "same text"
+    # 3. Same printed page of the same letter, minutes apart, one of them barely readable.
+    if (k.page_no is not None and p.page_no == k.page_no and k.page_total and p.page_total == k.page_total
+            and (k.hard_to_read or p.hard_to_read or sim is None or sim >= 0.3)):
+        fk, fp = k.fields, p.fields
+        if not (fk and fp and fk.sender and fp.sender and fk.sender != fp.sender):
+            return f"same page number {p.page_no} of {p.page_total}"
+    return None
 
 
 def mark_duplicates(photos: list[PhotoInfo]) -> None:
     """The same page or card photographed more than once: keep the clearest, set the rest aside.
 
-    Two document photos are duplicates when their upright images are near-identical
-    (dHash) AND, where both carry text, their word sets mostly agree (MinHash). The
-    text check stops two pages of the same form layout counting as one. The copy with
-    more readable words, then the sharper one, is kept. Nothing is deleted: the others
-    appear under "Not documents" as "Duplicate of …" and can be added back.
+    A second photo counts as a copy when (1) its upright picture is near-identical and the
+    words, where both have them, agree; or, when taken within 15 minutes of the other,
+    (2) the words agree closely although the picture differs (another angle), or (3) it
+    shows the same printed page number of the same letter. Different printed page numbers
+    are never copies. The copy with more readable words, then the sharper one, is kept.
+    Nothing is deleted: the others appear under "Not documents" as "Duplicate of ..."
+    and can be added back.
     """
-    from photo2pdf.features import hamming, minhash_similarity
-
     docs = [p for p in photos if p.is_document and p.dhash is not None]
     docs.sort(key=lambda p: (-p.words, -p.sharpness))      # best copies first
     kept: list[PhotoInfo] = []
     for p in docs:
-        dup_of = None
+        dup_of, why = None, None
         for k in kept:
-            if k.kind != p.kind or k.path.parent != p.path.parent:
-                continue
-            if hamming(k.dhash, p.dhash) > DUP_IMAGE_BITS:
-                continue
-            if k.minhash and p.minhash and minhash_similarity(k.minhash, p.minhash) < DUP_TEXT_SIMILARITY:
-                continue
-            if (bool(k.minhash) != bool(p.minhash) and (k.words >= 4 or p.words >= 4)
-                    and not (k.hard_to_read or p.hard_to_read)):
-                continue   # text on one, none on the other: different things, unless one is a blur
-            dup_of = k
-            break
+            why = _same_page(k, p)
+            if why:
+                dup_of = k
+                break
         if dup_of is None:
             kept.append(p)
         else:
             p.is_document = False
+            p.duplicate_of = dup_of.path
             p.reason = f"Duplicate of {dup_of.path.name} (the clearer copy is kept)"
-            logging.info("duplicate %s of %s", p.path.name, dup_of.path.name)
+            logging.info("duplicate %s of %s (%s)", p.path.name, dup_of.path.name, why)
 
 
 ORGANIZE_CHOICES = {
@@ -545,8 +663,8 @@ class Plan:
 
     def checkpoint(self) -> None:
         """Remember the current state; call before every edit."""
-        snap = ([[(p, p.rotation, p.thumb) for p in g] for g in self.groups],
-                [(p, p.rotation, p.thumb) for p in self.others],
+        snap = ([[(p, p.rotation) for p in g] for g in self.groups],
+                [(p, p.rotation) for p in self.others],
                 dict(self.custom_names), set(self.excluded))
         self.history.append(snap)
         del self.history[:-50]
@@ -561,8 +679,8 @@ class Plan:
 
         def back(items):
             out = []
-            for p, rot, thumb in items:
-                p.rotation, p.thumb = rot, thumb
+            for p, rot in items:
+                p.rotation = rot
                 out.append(p)
             return out
 
@@ -615,8 +733,6 @@ class Plan:
     def rotate(self, g: int, i: int, degrees_cw: int) -> None:
         ph = self.groups[g][i]
         ph.rotation = (ph.rotation + degrees_cw) % 360
-        if ph.get_thumb() is not None:
-            ph.thumb = rotate_cw(ph.thumb, degrees_cw)
 
     def set_name(self, g: int, name: str) -> None:
         name = name.strip()
@@ -635,7 +751,7 @@ class Plan:
     def add(self, other_index: int) -> None:
         """Turn a non-document photo into its own document, placed in time order."""
         ph = self.others.pop(other_index)
-        ph.reason = None
+        ph.reason, ph.duplicate_of = None, None
         if ph.kind not in ("page", "card", "receipt", "confirmation", "ticket", "note", "label"):
             ph.kind = "page"
         idx = 0

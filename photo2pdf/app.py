@@ -49,7 +49,7 @@ def load_options() -> Options:
         saved = json.loads((_data_dir() / "settings.json").read_text("utf-8"))
         # Only what the Settings dialog shows. Internal values (OCR language, sizes) always come
         # from the current version's defaults, so an old settings file can't pin outdated ones.
-        for k in ("combine", "ocr", "grayscale", "straighten", "organize"):
+        for k in ("combine", "ocr", "grayscale", "straighten", "organize", "thumb_size"):
             if k in saved:
                 setattr(opts, k, saved[k])
     except (OSError, ValueError):
@@ -161,6 +161,7 @@ class App:
         menubar.add_cascade(label="File", menu=filem)
         helpm = tk.Menu(menubar, tearoff=0)
         helpm.add_command(label="How to use", command=self._open_help)
+        helpm.add_command(label="Photos are on my iPhone…", command=self.phone_help)
         helpm.add_command(label="Report a problem or idea…", command=self.report_dialog)
         helpm.add_command(label="Open the log folder", command=lambda: open_file(diag.log_dir()))
         helpm.add_separator()
@@ -202,7 +203,11 @@ class App:
         self.hint = ttk.Label(outer, foreground="#555", text=(
             "Tip: you can also drag a folder, or some photos, onto this window." if self.dnd_files
             else ""))
-        self.hint.pack(anchor="w", pady=(0, 8))
+        self.hint.pack(anchor="w", pady=(0, 2))
+        phone = ttk.Label(outer, foreground="#1a5fb4", cursor="hand2",
+                          text="Photos still on an iPhone or other phone? Click here first.")
+        phone.pack(anchor="w", pady=(0, 8))
+        phone.bind("<Button-1>", lambda e: self.phone_help())
 
         # Quick-mode progress area (hidden until used)
         self.work = ttk.Frame(outer)
@@ -249,7 +254,10 @@ class App:
         from tkinter import filedialog
 
         d = filedialog.askdirectory(parent=self.root, title="Choose the folder with your photos")
-        if d:
+        if d and not Path(d).is_dir():      # e.g. a phone: shown by Explorer, not a real folder
+            logging.info("chosen folder is not a directory on disk")
+            self.phone_help(reason="That place can't be opened as a folder.")
+        elif d:
             self.open_folders([Path(d)])
 
     def open_folders(self, inputs: list[Path]) -> None:
@@ -274,7 +282,32 @@ class App:
             self.start(list(files))
 
     def _on_drop(self, event) -> None:
-        self.start(list(self.root.tk.splitlist(event.data)))
+        items = list(self.root.tk.splitlist(event.data or ""))
+        real = [f for f in items if Path(f).exists()]
+        if not real:
+            # Items dragged straight from a phone in Explorer are not files on this computer.
+            logging.info("drop with no usable paths: %d items", len(items))
+            self.phone_help(reason="Those photos can't be opened from where they are.")
+            return
+        self.start(real)
+
+    def phone_help(self, reason: str = "") -> None:
+        """Photos on a phone connected by cable are not ordinary files: Windows shows the phone
+        in Explorer, but programs can only open the photos after they are copied to this PC."""
+        lines = ([reason, ""] if reason else []) + [
+            "Photos on a phone have to be copied onto this computer first. "
+            "Programs can't open them directly from the phone, and dragging them from the phone "
+            "doesn't work either.",
+            "",
+            "1. Connect the iPhone with its cable and unlock it. If it asks \"Trust this computer?\", tap Trust.",
+            "2. Open File Explorer. Under \"This PC\" click Apple iPhone, then Internal Storage, then DCIM.",
+            "3. Select all the folders there, press Ctrl+C, open your Pictures folder, make a new folder "
+            "(for example \"iPhone photos\") and press Ctrl+V inside it. A lot of photos can take a while.",
+            "4. Back here, click \"Organize a folder of photos\" and choose that new folder.",
+            "",
+            "Copying only adds files; nothing is removed from the phone.",
+        ]
+        self.ui.show_result(self.root, "Photos on a phone", lines, [])
 
     def start(self, files: list[str]) -> None:
         """Entry for drops, Send To and the file picker. Any folder -> organize mode."""
