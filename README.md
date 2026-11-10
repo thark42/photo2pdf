@@ -3,7 +3,10 @@
 A small offline Windows app that turns phone photos of documents into
 searchable PDFs. It is built for a non-technical user with an existing
 archive of photographed tax and government letters, in Dutch and English.
-It is not part of the LifeOS stack and runs nothing on LifeOS hosts.
+It makes no network connections.
+
+**Download:** the installer is attached to each
+[release](../../releases/latest). Licence: MIT ([`LICENSE`](LICENSE)).
 
 End-user instructions: [`HOW_TO_USE.txt`](HOW_TO_USE.txt). The installer
 ships this file too.
@@ -438,8 +441,7 @@ Expect misses. The review screen is where they get fixed.
 
 ## Build
 
-Builds run in CI only:
-[`.github/workflows/photo2pdf-windows.yml`](../../.github/workflows/photo2pdf-windows.yml).
+Builds run in CI only: [`.github/workflows/build.yml`](.github/workflows/build.yml).
 
 1. Run pytest on Linux, using the system tesseract with eng, nld and osd.
 2. Install Tesseract on the Windows runner (`choco install tesseract`). Keep
@@ -458,14 +460,13 @@ Builds run in CI only:
 6. Install silently, check the Send-To shortcut exists, then run
    `--selftest` on the installed copy.
 7. Upload two artifacts: `PhotosToPDF-Setup-<ver>` and `PhotosToPDF-portable-<ver>`.
-
-Artifacts need a GitHub login to download and expire after the repo's
-retention period (90 days by default).
+8. On a pushed tag `v<ver>` (must equal `photo2pdf.__version__`), publish a
+   GitHub Release with the installer and a portable zip attached, using
+   [`RELEASE_NOTES.md`](RELEASE_NOTES.md) as the text.
 
 ## Develop / test on Linux
 
 ```bash
-cd tools/photo2pdf
 pip install -r requirements-build.txt
 # apt install tesseract-ocr tesseract-ocr-eng tesseract-ocr-nld tesseract-ocr-osd python3-tk
 pytest -q tests
@@ -485,9 +486,11 @@ download).
 
 ## Third-party licences (bundled in the installer)
 
-Tesseract and its tessdata (Apache-2.0), OpenCV (Apache-2.0), NumPy
-(BSD-3), Pillow (MIT-CMU), pillow-heif (BSD-3, bundles libheif LGPL-3),
-img2pdf (LGPL-3), pikepdf (MPL-2.0), pypdf (BSD-3), tkinterdnd2 (MIT),
-Python (PSF). [VERIFY: exact licence of each pinned version, and whether
-the opencv-python-headless Windows wheel bundles any LGPL components,
-before any wider distribution than one friend]
+The build runs [`packaging/collect_licenses.py`](packaging/collect_licenses.py),
+which copies the licence files of every bundled component into a `licenses`
+folder next to `Photo2PDF.exe`, with an `INDEX.txt` listing name, version and
+declared licence. It takes them from the installed packages, so they match
+the pinned versions, and fails the build if a component has none. Components:
+Python, Tcl/Tk, Tesseract and its `tessdata_fast` language data, OpenCV,
+NumPy, Pillow, pillow-heif (with libheif), img2pdf, pikepdf, pypdf, lxml,
+tkinterdnd2.

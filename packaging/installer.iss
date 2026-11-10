@@ -1,4 +1,4 @@
-; Inno Setup script. Built by .github/workflows/photo2pdf-windows.yml:
+; Inno Setup script. Built by .github/workflows/build.yml:
 ;   iscc /DAppVersion=0.1.0 /DSourceDir=<pyinstaller dist\Photo2PDF> packaging\installer.iss
 ;
 ; Per-user install: no admin prompt, lands in %LOCALAPPDATA%\Programs.

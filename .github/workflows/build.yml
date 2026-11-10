@@ -1,0 +1,193 @@
+# Builds the "Photos to PDF" Windows app.
+#
+# Outputs (Actions run page -> Artifacts):
+#   PhotosToPDF-Setup-<ver>   installer: Start menu, desktop, Send-To shortcuts; no admin
+#   PhotosToPDF-portable-<ver> unzip-and-run folder, same app
+#
+# OCR languages bundled: Dutch + English (+ osd for orientation).
+#
+# Tesseract (OCR engine) is bundled inside the app, so the end user installs
+# nothing else. The built .exe and the installed copy are both exercised with
+# `--selftest`, which OCRs a generated sideways page and checks the text.
+
+name: build
+
+#
+# Pushing a tag "v<version>" (matching photo2pdf/__init__.py) also publishes a
+# GitHub Release with the installer and the portable zip attached.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install tesseract
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-eng tesseract-ocr-nld tesseract-ocr-osd
+      - name: Install deps
+        run: pip install -r requirements-build.txt
+      - name: pytest
+        run: pytest -q tests
+
+  build-windows:
+    runs-on: windows-latest
+    needs: test-linux
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python deps
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-build.txt
+
+      - name: Install Tesseract
+        shell: pwsh
+        run: |
+          choco install tesseract -y --no-progress
+          $exe = Get-ChildItem -Path "$env:ProgramFiles", "${env:ProgramFiles(x86)}" -Filter tesseract.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $exe) { throw "tesseract.exe not found after choco install" }
+          "TESS_DIR=$($exe.DirectoryName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          & $exe.FullName --version
+
+      - name: Stage Tesseract (eng + nld + osd only)
+        shell: pwsh
+        run: |
+          $dst = "build\tesseract"
+          New-Item -ItemType Directory -Force -Path $dst | Out-Null
+          Copy-Item -Path "$env:TESS_DIR\*" -Destination $dst -Recurse -Force
+          Remove-Item -Force -ErrorAction SilentlyContinue "$dst\unins*"
+          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "$dst\doc"
+          # Drop other languages; keep configs/ (the 'pdf' renderer config lives there).
+          Get-ChildItem "$dst\tessdata" -Filter *.traineddata |
+            Where-Object { $_.Name -notin @('eng.traineddata', 'nld.traineddata', 'osd.traineddata') } |
+            Remove-Item -Force
+          foreach ($lang in 'eng', 'nld', 'osd') {
+            $f = "$dst\tessdata\$lang.traineddata"
+            if (-not (Test-Path $f)) {
+              Invoke-WebRequest -Uri "https://github.com/tesseract-ocr/tessdata_fast/raw/main/$lang.traineddata" -OutFile $f
+            }
+          }
+          if (-not (Test-Path "$dst\tessdata\configs\pdf")) { throw "tessdata\configs\pdf missing" }
+          & "$dst\tesseract.exe" --tessdata-dir "$dst\tessdata" --list-langs
+          "{0:N1} MB" -f ((Get-ChildItem $dst -Recurse | Measure-Object Length -Sum).Sum / 1MB)
+
+      - name: pytest (Windows, bundled tesseract)
+        shell: pwsh
+        env:
+          PHOTO2PDF_TESSERACT: ${{ github.workspace }}\build\tesseract\tesseract.exe
+        run: |
+          # Tests that need tesseract look it up on PATH.
+          $env:PATH = "$env:GITHUB_WORKSPACE\build\tesseract;$env:PATH"
+          $env:TESSDATA_PREFIX = "$env:GITHUB_WORKSPACE\build\tesseract\tessdata"
+          python -X faulthandler -m pytest -v -s -p no:cacheprovider tests
+
+      - name: Version
+        shell: pwsh
+        run: |
+          $v = python -c "import sys; sys.path.insert(0, '.'); import photo2pdf; print(photo2pdf.__version__)"
+          "APP_VERSION=$v" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: PyInstaller
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm --clean --windowed --name Photo2PDF `
+            --paths . `
+            --collect-all tkinterdnd2 `
+            --collect-all pillow_heif `
+            --collect-all pikepdf `
+            --add-data "build\tesseract;tesseract" `
+            packaging\launcher.py
+          Copy-Item HOW_TO_USE.txt, LICENSE dist\Photo2PDF\
+          python packaging\collect_licenses.py dist\Photo2PDF\licenses build\tesseract
+
+      - name: Self-test built exe
+        shell: pwsh
+        run: |
+          $out = "$env:RUNNER_TEMP\st-exe\out.pdf"
+          $p = Start-Process -FilePath "dist\Photo2PDF\Photo2PDF.exe" -ArgumentList '--selftest', "`"$out`"" -Wait -PassThru
+          Get-Content ($out -replace '\.pdf$', '.txt')
+          if ($p.ExitCode -ne 0) { throw "selftest failed: $($p.ExitCode)" }
+
+      - name: Inno Setup installer
+        shell: pwsh
+        run: |
+          $iscc = (Get-Command iscc.exe -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+            $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          }
+          & $iscc "/DAppVersion=$env:APP_VERSION" "/DSourceDir=..\dist\Photo2PDF" packaging\installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "iscc failed" }
+
+      - name: Install silently + self-test installed copy
+        shell: pwsh
+        run: |
+          $setup = "dist\PhotosToPDF-Setup-$env:APP_VERSION.exe"
+          $p = Start-Process -FilePath $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/TASKS=desktopicon' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "installer exit $($p.ExitCode)" }
+          $exe = "$env:LOCALAPPDATA\Programs\Photos to PDF\Photo2PDF.exe"
+          if (-not (Test-Path $exe)) { throw "not installed at $exe" }
+          $sendto = "$env:APPDATA\Microsoft\Windows\SendTo\Photos to PDF.lnk"
+          if (-not (Test-Path $sendto)) { throw "Send To shortcut missing" }
+          $out = "$env:RUNNER_TEMP\st-installed\out.pdf"
+          $p = Start-Process -FilePath $exe -ArgumentList '--selftest', "`"$out`"" -Wait -PassThru
+          Get-Content ($out -replace '\.pdf$', '.txt')
+          if ($p.ExitCode -ne 0) { throw "installed selftest failed: $($p.ExitCode)" }
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: PhotosToPDF-Setup-${{ env.APP_VERSION }}
+          path: dist/PhotosToPDF-Setup-*.exe
+          if-no-files-found: error
+
+      - name: Upload portable
+        uses: actions/upload-artifact@v4
+        with:
+          name: PhotosToPDF-portable-${{ env.APP_VERSION }}
+          path: dist/Photo2PDF/
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    needs: build-windows
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Check tag matches app version
+        run: |
+          v=$(python3 -c "import sys; sys.path.insert(0, '.'); import photo2pdf; print(photo2pdf.__version__)")
+          test "${GITHUB_REF_NAME}" = "v$v" || { echo "tag ${GITHUB_REF_NAME} != v$v"; exit 1; }
+          echo "APP_VERSION=$v" >> "$GITHUB_ENV"
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd artifacts
+          (cd "PhotosToPDF-portable-$APP_VERSION" && zip -qr "../PhotosToPDF-portable-$APP_VERSION.zip" .)
+          gh release create "$GITHUB_REF_NAME" \
+            "PhotosToPDF-Setup-$APP_VERSION/PhotosToPDF-Setup-$APP_VERSION.exe" \
+            "PhotosToPDF-portable-$APP_VERSION.zip" \
+            --repo "$GITHUB_REPOSITORY" --title "Photos to PDF $APP_VERSION" --notes-file RELEASE_NOTES.md
